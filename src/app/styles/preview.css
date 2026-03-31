@@ -1,0 +1,306 @@
+/*
+ * Preview pane styles — github-markdown-css base + design system overrides.
+ *
+ * Strategy: import github-markdown-css for comprehensive markdown element styling
+ * (handles dozens of edge cases: nested lists, table alignment, task lists, etc.)
+ * then override colors to use our design system tokens. The CSS custom properties
+ * handle light/dark theming automatically.
+ *
+ * This stylesheet is also used for Worker SSR output — the same class names apply.
+ */
+
+@import 'github-markdown-css/github-markdown.css';
+
+/* ================================================================
+   Color overrides — replace github-markdown-css's hardcoded colors
+   with design system tokens
+   ================================================================ */
+
+.markdown-body {
+  /* Reset github-markdown-css's own color scheme */
+  color-scheme: unset;
+
+  /* Surfaces */
+  background-color: transparent;
+  color: var(--ink);
+
+  /* Typography — match our design system */
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+
+  /* Content width — comfortable reading measure */
+  max-width: 72ch;
+}
+
+/* ================================================================
+   Headings
+   ================================================================ */
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  color: var(--ink);
+  border-bottom-color: var(--pencil);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+}
+
+.markdown-body h1 {
+  font-size: var(--text-xl);
+  line-height: var(--leading-tight);
+}
+
+.markdown-body h2 {
+  font-size: var(--text-lg);
+  line-height: var(--leading-tight);
+}
+
+.markdown-body h3 {
+  font-size: var(--text-md);
+  line-height: var(--leading-snug);
+}
+
+/* ================================================================
+   Links
+   ================================================================ */
+
+.markdown-body a {
+  color: var(--margin-note);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color var(--duration-fast) var(--ease-out);
+}
+
+.markdown-body a:hover {
+  color: var(--margin-hover);
+}
+
+.markdown-body a:active {
+  color: var(--margin-active);
+}
+
+/* ================================================================
+   Code — inline and blocks
+   ================================================================ */
+
+.markdown-body code,
+.markdown-body tt {
+  background-color: var(--code-surface);
+  color: var(--code-text);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.15em 0.35em;
+}
+
+.markdown-body pre {
+  background-color: var(--code-surface);
+  border: 1px solid var(--pencil-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  overflow-x: auto;
+}
+
+.markdown-body pre code,
+.markdown-body pre tt {
+  background-color: transparent;
+  color: var(--code-text);
+  padding: 0;
+  border: none;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+/* ================================================================
+   Blockquotes
+   ================================================================ */
+
+.markdown-body blockquote {
+  border-left: 3px solid var(--pencil-strong);
+  color: var(--ink-secondary);
+  padding-left: var(--space-base);
+}
+
+/* ================================================================
+   Tables
+   ================================================================ */
+
+.markdown-body table {
+  border-color: var(--pencil);
+}
+
+.markdown-body table th,
+.markdown-body table td {
+  border-color: var(--pencil);
+  padding: var(--space-sm) var(--space-md);
+}
+
+.markdown-body table th {
+  background-color: var(--paper-inset);
+  color: var(--ink);
+  font-weight: var(--weight-semibold);
+}
+
+.markdown-body table tr {
+  background-color: transparent;
+  border-top-color: var(--pencil);
+}
+
+.markdown-body table tr:nth-child(2n) {
+  background-color: var(--paper-inset);
+}
+
+/* ================================================================
+   Horizontal rules
+   ================================================================ */
+
+.markdown-body hr {
+  background-color: var(--pencil);
+  border: none;
+  height: 1px;
+}
+
+/* ================================================================
+   Images
+   ================================================================ */
+
+.markdown-body img {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--pencil-subtle);
+}
+
+/* ================================================================
+   Task list checkboxes
+   ================================================================ */
+
+.markdown-body .task-list-item-checkbox,
+.markdown-body input[type='checkbox'] {
+  accent-color: var(--margin-note);
+}
+
+/* ================================================================
+   Definition lists (if markdown-it produces them)
+   ================================================================ */
+
+.markdown-body dl dt {
+  color: var(--ink);
+  font-weight: var(--weight-semibold);
+}
+
+.markdown-body dl dd {
+  color: var(--ink-secondary);
+}
+
+/* ================================================================
+   highlight.js syntax theme — design system aligned
+   Recolored from the github hljs theme using our token palette.
+   ================================================================ */
+
+.markdown-body .hljs {
+  color: var(--code-text);
+  background: var(--code-surface);
+}
+
+/* Comments, metadata — faded */
+.markdown-body .hljs-comment,
+.markdown-body .hljs-quote {
+  color: var(--ink-muted);
+  font-style: italic;
+}
+
+/* Keywords, selectors, strong emphasis */
+.markdown-body .hljs-keyword,
+.markdown-body .hljs-selector-tag,
+.markdown-body .hljs-type {
+  color: var(--ink);
+  font-weight: var(--weight-semibold);
+}
+
+/* Strings, literals */
+.markdown-body .hljs-string,
+.markdown-body .hljs-doctag,
+.markdown-body .hljs-regexp,
+.markdown-body .hljs-template-variable,
+.markdown-body .hljs-template-tag {
+  color: var(--mark-success);
+}
+
+/* Numbers, constants */
+.markdown-body .hljs-number,
+.markdown-body .hljs-literal,
+.markdown-body .hljs-variable,
+.markdown-body .hljs-bullet {
+  color: var(--margin-note);
+}
+
+/* Built-in types, function names */
+.markdown-body .hljs-built_in,
+.markdown-body .hljs-title,
+.markdown-body .hljs-section {
+  color: var(--margin-note);
+  font-weight: var(--weight-medium);
+}
+
+/* Attributes, properties */
+.markdown-body .hljs-attr,
+.markdown-body .hljs-attribute,
+.markdown-body .hljs-name,
+.markdown-body .hljs-tag {
+  color: var(--ink-secondary);
+}
+
+/* Symbols, special */
+.markdown-body .hljs-symbol,
+.markdown-body .hljs-link {
+  color: var(--margin-note);
+}
+
+/* Additions / deletions (diff) */
+.markdown-body .hljs-addition {
+  color: var(--mark-success);
+  background-color: color-mix(in srgb, var(--mark-success) 10%, transparent);
+}
+
+.markdown-body .hljs-deletion {
+  color: var(--mark-error);
+  background-color: color-mix(in srgb, var(--mark-error) 10%, transparent);
+}
+
+/* Emphasis */
+.markdown-body .hljs-emphasis {
+  font-style: italic;
+}
+
+.markdown-body .hljs-strong {
+  font-weight: var(--weight-bold);
+}
+
+/* ================================================================
+   Preview container — fills parent, scrolls internally
+   ================================================================ */
+
+.preview-container {
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space-lg);
+}
+
+/* ================================================================
+   KaTeX overrides — integrate math rendering with design system
+   ================================================================ */
+
+.markdown-body .katex {
+  font-size: 1.1em;
+}
+
+.markdown-body .katex-display {
+  margin: var(--space-base) 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: var(--space-sm) 0;
+}

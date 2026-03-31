@@ -1,0 +1,15 @@
+# Optional environment variables for Markdown Viewer.
+# Copy this file to .dev.vars for local development, or set these
+# as secrets via `wrangler secret put <NAME>` for production.
+#
+# The app works fully without any of these — they're all optional.
+
+# Cloudflare Turnstile bot protection (https://dash.cloudflare.com/?to=/:account/turnstile)
+# TURNSTILE_SITE_KEY=0x4AAAAAAA...
+# TURNSTILE_SECRET_KEY=0x4AAAAAAA...
+
+# Cloudflare Web Analytics token (https://dash.cloudflare.com/?to=/:account/web-analytics)
+# CF_ANALYTICS_TOKEN=your-token-here
+
+# Restrict CORS to a specific origin (defaults to * if unset)
+# CORS_ORIGIN=https://your-domain.com

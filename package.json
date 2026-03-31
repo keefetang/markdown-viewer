@@ -1,0 +1,61 @@
+{
+  "name": "markdown-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "vite build",
+    "preview": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:prod": "wrangler deploy -c .deploy/wrangler.jsonc",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.10.3",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@codemirror/language": "^6.12.3",
+    "@codemirror/search": "^6.6.0",
+    "@codemirror/state": "^6.6.0",
+    "@codemirror/view": "^6.40.0",
+    "@lezer/highlight": "^1.2.3",
+    "@vscode/markdown-it-katex": "^1.1.2",
+    "dompurify": "^3.3.3",
+    "github-markdown-css": "^5.9.0",
+    "highlight.js": "^11.11.1",
+    "katex": "^0.16.44",
+    "markdown-it": "^14.1.1",
+    "markdown-it-task-lists": "^2.1.1",
+    "nanoid": "^5.1.7",
+    "svelte": "^5.0.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "TURNSTILE_SITE_KEY": {
+        "description": "Optional: Turnstile bot protection **site key** from the [Cloudflare dashboard](https://dash.cloudflare.com/?to=/:account/turnstile). Leave blank to skip."
+      },
+      "TURNSTILE_SECRET_KEY": {
+        "description": "Optional: Turnstile bot protection **secret key**. Required if site key is set."
+      },
+      "CF_ANALYTICS_TOKEN": {
+        "description": "Optional: [Web Analytics](https://dash.cloudflare.com/?to=/:account/web-analytics) token for cookie-free analytics."
+      },
+      "CORS_ORIGIN": {
+        "description": "Optional: Restrict API access to a specific origin (e.g. `https://your-domain.com`). Defaults to `*`."
+      }
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250313.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@types/dompurify": "^3.0.5",
+    "@types/markdown-it": "^14.1.2",
+    "svelte-check": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "wrangler": "^4.0.0"
+  }
+}

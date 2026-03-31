@@ -1,0 +1,102 @@
+/*
+ * CodeMirror 6 theme overrides — design system integration.
+ *
+ * The CM6 theme extension (in Editor.svelte) handles the programmatic theme.
+ * This file provides additional overrides for elements that can't be reached
+ * through EditorView.theme() alone, or that benefit from CSS specificity.
+ *
+ * All values reference CSS custom properties from global.css so light/dark
+ * theming works automatically via prefers-color-scheme.
+ */
+
+/* ================================================================
+   Editor container — fills parent, no own layout
+   ================================================================ */
+
+.editor-container {
+  height: 100%;
+  overflow: hidden;
+}
+
+.editor-container .cm-editor {
+  height: 100%;
+}
+
+/* Scrollbar styling inherited from global.css (* selector).
+   CM6's .cm-scroller is a regular DOM element — global styles apply. */
+
+.editor-container .cm-scroller {
+  overflow: auto;
+}
+
+/* ================================================================
+   Search panel — integrate with design system
+   ================================================================ */
+
+.editor-container .cm-search.cm-panel {
+  background: var(--paper-above);
+  border-bottom: 1px solid var(--pencil);
+  padding: var(--space-sm) var(--space-md);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  color: var(--ink);
+}
+
+.editor-container .cm-search.cm-panel input {
+  background: var(--paper-inset);
+  border: 1px solid var(--pencil);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  padding: var(--space-xs) var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.editor-container .cm-search.cm-panel input:focus {
+  border-color: var(--pencil-focus);
+  outline: none;
+}
+
+.editor-container .cm-search.cm-panel button {
+  background: var(--paper-inset);
+  border: 1px solid var(--pencil);
+  border-radius: var(--radius-sm);
+  color: var(--ink-secondary);
+  padding: var(--space-xs) var(--space-sm);
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+
+.editor-container .cm-search.cm-panel button:hover {
+  background: var(--pencil-subtle);
+  color: var(--ink);
+}
+
+.editor-container .cm-search.cm-panel label {
+  color: var(--ink-secondary);
+}
+
+/* ================================================================
+   Tooltip — autocomplete, hover info
+   ================================================================ */
+
+.editor-container .cm-tooltip {
+  background: var(--paper-above);
+  border: 1px solid var(--pencil);
+  border-radius: var(--radius-md);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+/* ================================================================
+   Search match highlights
+   ================================================================ */
+
+.editor-container .cm-searchMatch {
+  background-color: color-mix(in srgb, var(--mark-warning) 25%, transparent);
+}
+
+.editor-container .cm-searchMatch-selected {
+  background-color: color-mix(in srgb, var(--mark-warning) 45%, transparent);
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+*.log
+
+# Account-specific deploy config (not part of the open-source project)
+# The template IS tracked; actual config with account IDs is not.
+.deploy/*
+!.deploy/wrangler.jsonc.template
