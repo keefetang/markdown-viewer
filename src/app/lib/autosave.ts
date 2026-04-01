@@ -24,10 +24,17 @@ import type { SaveState } from './types';
 export interface AutosaveOptions {
   /** Debounce delay in ms. Defaults to 2000. */
   debounceMs?: number;
+  /**
+   * Seed content to treat as "already saved". Prevents a spurious first save
+   * when the $effect fires on mount with initial/placeholder values.
+   */
+  initialContent?: string;
   /** Called whenever the save state changes. */
   onStateChange: (state: SaveState) => void;
   /** Called after the first successful save (session creation). */
   onSessionCreated: (id: string, token: string) => void;
+  /** Called after every successful save with the server-reported updatedAt timestamp. */
+  onSaved?: (updatedAt: number) => void;
 }
 
 export interface AutosaveHandle {
@@ -49,7 +56,7 @@ export function createAutosave(options: AutosaveOptions): AutosaveHandle {
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let halted = false;   // true after 403 — no further saves
-  let lastSavedContent: string | null = null;
+  let lastSavedContent: string | null = options.initialContent ?? null;
 
   // Pending save params (set by `save`, consumed by `doSave`)
   let pendingId: string | null = null;
@@ -107,6 +114,7 @@ export function createAutosave(options: AutosaveOptions): AutosaveHandle {
 
       lastSavedContent = content;
       setState('saved');
+      options.onSaved?.(result.metadata.updatedAt);
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 403) {

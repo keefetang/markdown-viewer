@@ -17,18 +17,7 @@ export interface SessionMetadata {
 }
 
 // ---------------------------------------------------------------------------
-// HTML escaping
+// Re-exports — isomorphic escape utilities from src/shared/escape.ts
 // ---------------------------------------------------------------------------
 
-const HTML_ESCAPE_MAP: Record<string, string> = {
-  '&': '&amp;',
-  '"': '&quot;',
-  "'": '&#39;',
-  '<': '&lt;',
-  '>': '&gt;',
-};
-
-/** Escape a string for safe embedding in HTML attributes, text nodes, or JS string literals. */
-export function escapeForHtml(value: string): string {
-  return value.replace(/[&"'<>]/g, (ch) => HTML_ESCAPE_MAP[ch] || ch);
-}
+export { escapeForHtml, escapeText } from '../shared/escape';

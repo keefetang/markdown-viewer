@@ -28,7 +28,7 @@
   import { extractTitle } from '../shared/markdown';
   import { PLACEHOLDER_MARKDOWN } from './lib/placeholder';
   import type { AutosaveHandle } from './lib/autosave';
-  import type { ViewMode, SaveState, ThemeMode } from './lib/types';
+  import type { ViewMode, SaveState, ThemeMode, ContentSizeLevel } from './lib/types';
 
   // ─── Constants ─────────────────────────────────────────────────────────────
 
@@ -39,6 +39,8 @@
   const DELETE_UNDO_MS = 10_000;
   const FILE_ACCEPT = '.md,.markdown,.txt,.text';
   const MAX_FILE_SIZE = 524_288; // 512 KB
+  const WARN_THRESHOLD = Math.floor(MAX_FILE_SIZE * 0.9);
+  const CRITICAL_THRESHOLD = Math.floor(MAX_FILE_SIZE * 0.95);
 
   // ─── State ─────────────────────────────────────────────────────────────────
 
@@ -49,6 +51,7 @@
   let isReadOnly = $state(false);
   let isNarrow = $state(false);
   let themeMode = $state<ThemeMode>('system');
+  let lastSavedAt = $state<number | null>(null);
 
   // Toast state
   let toastMessage = $state('');
@@ -63,6 +66,7 @@
   // Delete undo state
   let deleteUndoContent: string | null = null;
   let deleteUndoTimer: ReturnType<typeof setTimeout> | undefined;
+  let undoInProgress = false;
 
   // Hidden file input for import
   let fileInputEl: HTMLInputElement | undefined;
@@ -82,6 +86,17 @@
   // ─── Derived ───────────────────────────────────────────────────────────────
 
   let stats = $derived(computeStats(markdown));
+
+  const textEncoder = new TextEncoder();
+  let contentByteSize = $derived(textEncoder.encode(markdown).byteLength);
+
+  let contentSizeLevel = $derived<ContentSizeLevel>(
+    contentByteSize >= CRITICAL_THRESHOLD ? 'critical'
+    : contentByteSize >= WARN_THRESHOLD ? 'warning'
+    : 'ok'
+  );
+
+  let contentSizeKB = $derived(Math.round(contentByteSize / 1024));
 
   // ─── Toast helper ─────────────────────────────────────────────────────────
 
@@ -123,13 +138,19 @@
     return null;
   }
 
-  function getBootstrapData(): { content: string } | null {
+  function getBootstrapData(): { content: string; updatedAt?: number } | null {
     const el = document.getElementById('__DATA__');
     if (!el?.textContent) return null;
     try {
-      const data = JSON.parse(el.textContent) as { content?: string };
+      const data = JSON.parse(el.textContent) as {
+        content?: string;
+        metadata?: { updatedAt?: number };
+      };
       if (typeof data.content === 'string') {
-        return { content: data.content };
+        return {
+          content: data.content,
+          updatedAt: typeof data.metadata?.updatedAt === 'number' ? data.metadata.updatedAt : undefined,
+        };
       }
     } catch {
       // Malformed bootstrap data — fall through to API fetch
@@ -143,11 +164,12 @@
     // --- Routing: determine session mode ---
     const routeId = parseRoute();
 
+    initTurnstile();
+
     if (routeId === null) {
       sessionId = nanoid(12);
       editToken = null;
       isReadOnly = false;
-      initTurnstile();
     } else {
       sessionId = routeId;
       const hashToken = extractAndCleanToken();
@@ -162,6 +184,7 @@
       const bootstrap = getBootstrapData();
       if (bootstrap) {
         markdown = bootstrap.content;
+        if (bootstrap.updatedAt) lastSavedAt = bootstrap.updatedAt;
       } else {
         void loadSession(routeId);
       }
@@ -210,6 +233,7 @@
       saveState = 'readonly';
     } else {
       autosave = createAutosave({
+        initialContent: markdown,
         onStateChange(state) {
           saveState = state;
         },
@@ -217,6 +241,9 @@
           editToken = token;
           storeToken(id, token);
           history.replaceState(null, '', `/${id}`);
+        },
+        onSaved(updatedAt) {
+          lastSavedAt = updatedAt;
         },
       });
     }
@@ -265,6 +292,7 @@
 
         autosave?.destroy();
         autosave = createAutosave({
+          initialContent: markdown,
           onStateChange(state) {
             saveState = state;
           },
@@ -273,11 +301,15 @@
             storeToken(newId, token);
             history.replaceState(null, '', `/${newId}`);
           },
+          onSaved(updatedAt) {
+            lastSavedAt = updatedAt;
+          },
         });
         return;
       }
 
       markdown = data.content;
+      lastSavedAt = data.metadata.updatedAt;
     } catch {
       showToast('Failed to load session', { type: 'error' });
     }
@@ -591,6 +623,7 @@
     // Set timer: if undo not clicked, dismiss toast and redirect to /
     clearTimeout(deleteUndoTimer);
     deleteUndoTimer = setTimeout(() => {
+      if (undoInProgress) return; // undo is in-flight — don't navigate
       deleteUndoContent = null;
       dismissToast();
       window.location.href = '/';
@@ -599,6 +632,7 @@
 
   /** Undo a delete: re-create session with held content. */
   async function handleDeleteUndo(): Promise<void> {
+    undoInProgress = true;
     clearTimeout(deleteUndoTimer);
     dismissToast();
 
@@ -654,6 +688,9 @@
     onShareReadOnly={() => { void handleShareReadOnly(); }}
     onFork={() => { void handleFork(); }}
     onDelete={() => { void handleDelete(); }}
+    {lastSavedAt}
+    {contentSizeLevel}
+    {contentSizeKB}
     {themeMode}
     onThemeToggle={handleThemeToggle}
   />

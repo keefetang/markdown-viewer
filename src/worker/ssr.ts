@@ -9,7 +9,7 @@
 
 import { renderMarkdown, extractTitle, stripInlineMarkdown } from '../shared/markdown';
 import { NonceInjector } from './security';
-import { escapeForHtml } from './shared';
+import { escapeForHtml, escapeText } from './shared';
 import type { SessionMetadata } from './shared';
 
 // ---------------------------------------------------------------------------
@@ -35,18 +35,6 @@ interface BootstrapData {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Escape a string for safe embedding in an HTML text node (not attributes). */
-function escapeText(value: string): string {
-  return value.replace(/[&<>]/g, (ch) => {
-    switch (ch) {
-      case '&': return '&amp;';
-      case '<': return '&lt;';
-      case '>': return '&gt;';
-      default: return ch;
-    }
-  });
-}
 
 /**
  * Extract a plain-text description (~160 chars) from markdown content.
@@ -160,11 +148,6 @@ export async function handleSession(request: Request, env: Env, nonce: string): 
     kvError = true;
   }
 
-  if (!kvError && (content === null || metadata === null)) {
-    // Session genuinely not found — redirect to home
-    return Response.redirect(`${url.origin}/`, 302);
-  }
-
   if (kvError) {
     // KV unavailable — serve the SPA shell without SSR content.
     // The client boots, sees it's on /:id, tries the API, and handles the error.
@@ -172,6 +155,11 @@ export async function handleSession(request: Request, env: Env, nonce: string): 
     return new HTMLRewriter()
       .on('script', new NonceInjector(nonce))
       .transform(shellResponse);
+  }
+
+  if (content === null || metadata === null) {
+    // Session genuinely not found — redirect to home
+    return Response.redirect(`${url.origin}/`, 302);
   }
 
   // Render markdown

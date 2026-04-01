@@ -1,8 +1,27 @@
 {
   "name": "markdown-viewer",
   "version": "0.1.0",
+  "description": "A fast, private markdown pad with shareable sessions — write, preview, and share markdown via URL.",
   "private": true,
   "type": "module",
+  "author": "Keefe Tang",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/keefetang/markdown-viewer.git"
+  },
+  "homepage": "https://github.com/keefetang/markdown-viewer",
+  "bugs": {
+    "url": "https://github.com/keefetang/markdown-viewer/issues"
+  },
+  "keywords": [
+    "markdown",
+    "markdown-viewer",
+    "markdown-editor",
+    "cloudflare-workers",
+    "svelte",
+    "codemirror"
+  ],
   "engines": {
     "node": ">=18"
   },

@@ -120,7 +120,7 @@ export function isTurnstileConfigured(): boolean {
 
 /**
  * Initialize Turnstile on the current page.
- * Call once on the `/` page (new sessions). No-ops if Turnstile is not configured
+ * Call once during app mount. No-ops if Turnstile is not configured
  * or if already initialized. Loads the Turnstile script from CDN once, then
  * runs an invisible challenge. Re-challenges on token expiry without reloading
  * the script.

@@ -1,22 +1,45 @@
 # Markdown Viewer
 
-A fast, privacy-first markdown pad with shareable sessions. Write markdown, see a live rendered preview, share via URL — all running on Cloudflare.
+A markdown pad that's fast, private, and yours to deploy. No accounts, no cookies, no tracking — just write markdown and see a live preview. Share the URL, and anyone can read it. Deploy your own instance to Cloudflare in one click.
+
+**[Try the live demo →](https://markdown.pentagram.me)**
+
+<!-- TODO: Add screenshot showing split view with editor and rendered preview -->
+
+> **Private by default.** No cookies. No user accounts. No personal data collected or stored. Sessions contain only your markdown content and timestamps. Nothing else.
 
 ## ✨ Features
 
-- **Split-pane editor** — CodeMirror 6 with syntax highlighting, three view modes (Editor / Split / Preview)
-- **Live preview** — Real-time rendering with synchronized scrolling
-- **GFM support** — Tables, task lists, syntax-highlighted code blocks, LaTeX math (lazy-loaded)
-- **Auto-save** — Content persists automatically with debounce
+### Editor
+
+- **Split-pane editing** — CodeMirror 6 with markdown syntax highlighting and resizable divider
+- **Three view modes** — Editor only, Split (side-by-side), or Preview only
+- **Synchronized scrolling** — Editor and preview scroll together (toggle-able)
+- **Content stats** — Live word count, character count, and estimated read time
+
+### Markdown
+
+- **GFM support** — Tables, task lists, strikethrough
+- **Syntax-highlighted code blocks** — 10 core languages via highlight.js
+- **KaTeX math** — LaTeX math rendering, lazy-loaded only when math is detected
+- **DOMPurify sanitization** — All rendered HTML sanitized against XSS
+
+### Sharing
+
+- **Auto-save** — Content saves to server with debounce, URL updates automatically
 - **Shareable sessions** — Edit links (with write access) and read-only links
 - **Fork** — Read-only visitors can fork any session into their own editable copy
-- **Import/Export** — Load from local files or URLs (with [11-step security validation](AGENTS.md#url-import-security-11-step-validation-chain)), download as Markdown, HTML, or PDF
-- **Copy as rich text** — Copy rendered content to clipboard
-- **Content stats** — Live word count, character count, read time
-- **OG previews** — Shared links render with Open Graph meta tags for social cards and AI agents
-- **Dark mode** — System preference with manual override (System / Light / Dark)
-- **Keyboard-driven** — All primary actions accessible via shortcuts
+- **Link previews** — Shared links unfurl with content preview in Slack, Discord, and social media
 - **90-day retention** — Sessions expire after 90 days of inactivity
+
+### Import / Export
+
+- **File import** — Load markdown from local files
+- **URL import** — Fetch content from any URL with server-side SSRF protection
+- **Download** — Save as Markdown, HTML, or PDF
+- **Clipboard** — Copy rendered content as rich text
+
+Dark mode (system + manual override), mobile responsive layout, and keyboard shortcuts for all primary actions.
 
 ## 🚀 Deploy to Cloudflare
 
@@ -26,7 +49,7 @@ Zero configuration required. The KV namespace is auto-created, rate limiting is 
 
 ## 🛠️ Local Development
 
-**Prerequisites:** Node.js ≥ 18, npm
+**Prerequisites:** Node.js >= 18, npm
 
 ```bash
 git clone https://github.com/keefetang/markdown-viewer.git
@@ -43,6 +66,12 @@ npm run dev
 | `npm run deploy` | Deploy to Cloudflare (generic) |
 | `npm run deploy:prod` | Deploy with custom domain (requires [setup](#-custom-domain-deploy)) |
 | `npm run cf-typegen` | Regenerate Worker type bindings |
+
+> **Note:** `npm run dev` works immediately — Wrangler creates a local KV namespace automatically. For manual production deploy (without the Deploy button), you'll need to create the KV namespace first:
+> ```bash
+> wrangler kv namespace create SESSIONS
+> ```
+> Then add the returned `id` to `wrangler.jsonc` under `kv_namespaces`.
 
 ## 🌐 Custom Domain Deploy
 
@@ -84,6 +113,7 @@ wrangler secret put TURNSTILE_SECRET_KEY
 - **Frontend:** Svelte 5, CodeMirror 6, markdown-it, highlight.js, KaTeX (lazy-loaded), DOMPurify
 - **Backend:** Cloudflare Workers + Static Assets + KV
 - **Build:** Vite, TypeScript
+- **Bundle:** ~88kb gzipped initial load — KaTeX math rendering lazy-loaded only when needed (~290kb)
 
 ## 🔒 Security
 
@@ -91,8 +121,9 @@ wrangler secret put TURNSTILE_SECRET_KEY
 - **Rate limiting** — All API endpoints are rate-limited (30 writes/min, 60 reads/min)
 - **Turnstile** — Optional invisible bot protection on session creation
 - **DOMPurify** — All rendered HTML sanitized against XSS
-- **Security headers** — CSP, Referrer-Policy, and other hardened defaults
-- **Input validation** — Content size limits and strict API contracts
+- **URL import protection** — Server-side proxy with 11-step SSRF validation chain (protocol, hostname, DNS rebinding, IP range, redirects, content type, size limits)
+- **Security headers** — CSP with per-request nonces, Referrer-Policy, and other hardened defaults
+- **Input validation** — Content size limits (512 KB) and strict API contracts
 
 ## 🔐 Privacy
 

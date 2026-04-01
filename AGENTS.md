@@ -34,8 +34,9 @@ src/
 │   ├── api.ts              # REST API: GET, PUT (upsert), DELETE sessions + POST import-url
 │   ├── ssr.ts              # HTMLRewriter SSR for /:id routes
 │   ├── security.ts         # Security headers middleware + CSP nonce injection
-│   └── shared.ts           # Shared types (SessionMetadata) + escape utilities
+│   └── shared.ts           # Shared types (SessionMetadata) + re-exports escape utilities
 ├── shared/
+│   ├── escape.ts           # Isomorphic HTML escape utilities (browser + Worker)
 │   └── markdown.ts         # markdown-it config + extractTitle (used by BOTH client and Worker)
 ├── app/                    # Svelte 5 SPA (client)
 │   ├── main.ts             # Entry point + theme init

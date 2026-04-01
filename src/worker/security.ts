@@ -52,6 +52,7 @@ export function applySecurityHeaders(response: Response, isApi: boolean, nonce?:
   const headers = new Headers(response.headers);
 
   // -- Universal headers --
+  headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   headers.set('Referrer-Policy', 'no-referrer');
   headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('X-Frame-Options', 'DENY');

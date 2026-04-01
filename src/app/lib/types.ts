@@ -6,3 +6,6 @@ export type SaveState = 'idle' | 'saving' | 'saved' | 'error' | 'readonly';
 
 /** Theme preference: follow system, or force light/dark. */
 export type ThemeMode = 'system' | 'light' | 'dark';
+
+/** Content size relative to the server limit. */
+export type ContentSizeLevel = 'ok' | 'warning' | 'critical';

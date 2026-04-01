@@ -9,6 +9,7 @@
  */
 
 import { renderMarkdown, extractTitle } from '../../shared/markdown';
+import { escapeForHtml } from '../../shared/escape';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -98,7 +99,7 @@ function buildHtmlDocument(renderedHtml: string, title: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)}</title>
+<title>${escapeForHtml(title)}</title>
 <style>
 ${INLINE_STYLES}
 </style>
@@ -109,12 +110,6 @@ ${renderedHtml}
 </article>
 </body>
 </html>`;
-}
-
-/** Escape HTML special characters for safe embedding in attributes/text. */
-const HTML_ESCAPE_MAP: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-function escapeHtml(str: string): string {
-  return str.replace(/[&<>"']/g, (ch) => HTML_ESCAPE_MAP[ch] || ch);
 }
 
 /**

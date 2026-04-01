@@ -12,8 +12,9 @@
    * Design system: borders-only depth, warm paper surface, ink text.
    * All values via CSS custom properties.
    */
+  import { onMount } from 'svelte';
   import type { ContentStats } from '../lib/stats';
-  import type { ViewMode, SaveState, ThemeMode } from '../lib/types';
+  import type { ViewMode, SaveState, ThemeMode, ContentSizeLevel } from '../lib/types';
   import { importUrl } from '../lib/api';
 
   interface Props {
@@ -23,6 +24,9 @@
     onSyncScrollToggle: () => void;
     stats: ContentStats;
     saveState: SaveState;
+    lastSavedAt?: number | null;
+    contentSizeLevel?: ContentSizeLevel;
+    contentSizeKB?: number;
     isNarrow?: boolean;
     isReadOnly?: boolean;
     themeMode?: ThemeMode;
@@ -48,6 +52,9 @@
     onSyncScrollToggle,
     stats,
     saveState,
+    lastSavedAt = null,
+    contentSizeLevel = 'ok',
+    contentSizeKB = 0,
     isNarrow = false,
     isReadOnly = false,
     themeMode = 'system',
@@ -167,17 +174,32 @@
     }
   }
 
+  // ─── Relative time ────────────────────────────────────────────────────────
+
+  const MINUTE = 60_000;
+  const HOUR = 3_600_000;
+  const DAY = 86_400_000;
+
+  /** Format a timestamp as a compact relative string: "just now", "2m ago", "1h ago", "3d ago". */
+  function formatRelativeTime(timestamp: number, now: number): string {
+    const delta = Math.max(0, now - timestamp); // clamp: server clock may be slightly ahead
+    if (delta < MINUTE) return 'just now';
+    if (delta < HOUR) return `${Math.floor(delta / MINUTE)}m ago`;
+    if (delta < DAY) return `${Math.floor(delta / HOUR)}h ago`;
+    return `${Math.floor(delta / DAY)}d ago`;
+  }
+
+  // Tick counter increments every 30s to trigger re-derivation of relative time
+  let tick = $state(0);
+  let tickInterval: ReturnType<typeof setInterval> | undefined;
+
+  onMount(() => {
+    clearInterval(tickInterval); // defensive: clear stale interval on HMR re-mount
+    tickInterval = setInterval(() => { tick += 1; }, 30_000);
+    return () => { clearInterval(tickInterval); };
+  });
+
   // ─── Derived ──────────────────────────────────────────────────────────────
-
-  const saveLabels: Record<SaveState, string> = {
-    idle: '',
-    saving: 'Saving\u2026',
-    saved: 'Saved',
-    error: 'Save error',
-    readonly: 'Read-only',
-  };
-
-  let saveLabel = $derived(saveLabels[saveState]);
 
   let saveClass = $derived(
     saveState === 'error' ? 'save-error'
@@ -185,6 +207,23 @@
     : saveState === 'readonly' ? 'save-readonly'
     : ''
   );
+
+  // Relative time display — updates every 30s via tick counter
+  let relativeTime = $derived.by(() => {
+    void tick; // read to establish reactivity dependency
+    if (!lastSavedAt) return '';
+    return formatRelativeTime(lastSavedAt, Date.now());
+  });
+
+  // Combined save + timestamp label for display
+  let saveDisplayLabel = $derived.by(() => {
+    if (saveState === 'saving') return 'Saving\u2026';
+    if (saveState === 'error') return 'Save error';
+    if (saveState === 'readonly') return 'Read-only';
+    if (relativeTime) return `Saved ${relativeTime}`;
+    if (saveState === 'saved') return 'Saved';
+    return '';
+  });
 
   // Theme toggle: ☀ (sun) for dark mode (click → light), ☾ (moon) for light mode (click → system),
   // ◐ (half-circle) for system mode (click → opposite of computed)
@@ -362,8 +401,14 @@
 
       {#if isReadOnly}
         <span class="readonly-badge">Read-only</span>
-      {:else if saveLabel}
-        <span class="save-indicator {saveClass}">{saveLabel}</span>
+      {:else if saveDisplayLabel}
+        <span class="save-indicator {saveClass}">{saveDisplayLabel}</span>
+      {/if}
+
+      {#if contentSizeLevel !== 'ok'}
+        <span class="size-warning" class:size-critical={contentSizeLevel === 'critical'}>
+          {contentSizeKB} KB / 512 KB
+        </span>
       {/if}
 
       <span class="stats">
@@ -408,8 +453,8 @@
 
       {#if isReadOnly}
         <span class="readonly-badge">Read-only</span>
-      {:else if saveLabel}
-        <span class="save-indicator {saveClass}">{saveLabel}</span>
+      {:else if saveDisplayLabel}
+        <span class="save-indicator {saveClass}">{saveDisplayLabel}</span>
       {/if}
     </div>
 
@@ -491,6 +536,11 @@
 
           <div class="dropdown-meta">
             {stats.words}w · {stats.chars}c · {stats.readTime}m read
+            {#if contentSizeLevel !== 'ok'}
+              <span class="size-warning-mobile" class:size-critical={contentSizeLevel === 'critical'}>
+                · {contentSizeKB} KB / 512 KB
+              </span>
+            {/if}
           </div>
         </div>
       {/if}
@@ -822,6 +872,31 @@
     color: var(--ink-muted);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Content size warning ── */
+
+  .size-warning {
+    font-size: var(--text-xs);
+    font-weight: var(--weight-medium);
+    color: var(--mark-warning);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .size-warning.size-critical {
+    color: var(--mark-error);
+    font-weight: var(--weight-semibold);
+  }
+
+  .size-warning-mobile {
+    color: var(--mark-warning);
+    font-weight: var(--weight-medium);
+  }
+
+  .size-warning-mobile.size-critical {
+    color: var(--mark-error);
+    font-weight: var(--weight-semibold);
   }
 
   /* ── URL import panel ── */
