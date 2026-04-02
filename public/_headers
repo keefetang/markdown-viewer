@@ -1,0 +1,4 @@
+# Hashed static assets (Vite output) — cache permanently.
+# Filenames include content hashes, so they change when content changes.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

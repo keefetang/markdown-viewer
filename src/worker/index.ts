@@ -73,14 +73,13 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 function handleRobotsTxt(): Response {
-  // Session paths are 12-char alphanumeric IDs at root level.
-  // robots.txt can't pattern-match exactly, but X-Robots-Tag: noindex
-  // on SSR responses is the primary indexing prevention mechanism.
-  // This file supplements by disallowing /api/ and common bot targets.
+  // Only the front page is indexable. Everything else — session content,
+  // API, assets — is disallowed. X-Robots-Tag: noindex on SSR responses
+  // is the belt; this is the suspenders.
   const body = [
     'User-agent: *',
     'Allow: /$',
-    'Disallow: /api/',
+    'Disallow: /',
     '',
   ].join('\n');
 

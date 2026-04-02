@@ -319,6 +319,13 @@ body {
   min-height: 100%;
 }
 
+/* SSR content div — visible to crawlers parsing raw HTML, hidden for
+   users so there's no flash of rendered content before the SPA mounts.
+   Session routes already set X-Robots-Tag: noindex; OG tags live in <head>. */
+#content {
+  display: none;
+}
+
 #app {
   min-height: 100vh;
   display: flex;
