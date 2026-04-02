@@ -15,13 +15,15 @@ Single Cloudflare Worker project with three responsibilities:
 ```
 /assets/*  →  CDN (no Worker invocation)
 /*         →  Worker
-               ├── /         → ASSETS.fetch() + HTMLRewriter (inject config)
+               ├── /         → ASSETS.fetch() + HTMLRewriter (OG tags + SEO content + config)
                ├── /api/*    → REST API (4 endpoints)
                ├── /robots.txt → Static text
                └── /:id      → SSR via HTMLRewriter (OG tags + rendered content + bootstrap data)
 ```
 
-**Hybrid rendering:** `/:id` routes are server-rendered for crawlers/AI agents (OG meta tags, visible HTML). The SPA boots from injected bootstrap data without a redundant API fetch. The root `/` serves the SPA shell with runtime config injected via HTMLRewriter.
+**Hybrid rendering:** `/:id` routes are server-rendered for crawlers/AI agents (OG meta tags, visible HTML). The SPA boots from injected bootstrap data without a redundant API fetch. The root `/` serves the SPA shell with OG tags, hidden SEO content (feature description in `#content`), and runtime config injected via HTMLRewriter. Private sessions get the bare SPA shell — no SSR, no OG tags, no bootstrap data (the edit token lives in the URL hash which never reaches the server).
+
+**Content negotiation:** Both `/` and `/:id` check the `Accept` header. When `Accept: text/markdown` is present (and `text/html` is absent), `/` returns a markdown description of the tool and `/:id` returns the raw markdown content. Private sessions require `X-Edit-Token` for content negotiation too. This enables CLI tools (`curl -H 'Accept: text/markdown'`) and AI agents to fetch content without parsing HTML.
 
 **Static assets** (Vite hashed output in `dist/`) are served directly from CDN — the Worker never touches them.
 
@@ -33,10 +35,12 @@ src/
 │   ├── index.ts            # Router: API, SSR, assets, CORS, error handling
 │   ├── api.ts              # REST API: GET, PUT (upsert), DELETE sessions + POST import-url
 │   ├── ssr.ts              # HTMLRewriter SSR for /:id routes
+│   ├── index-content.ts    # Static HTML + markdown content for index page SEO + content negotiation
 │   ├── security.ts         # Security headers middleware + CSP nonce injection
 │   └── shared.ts           # Shared types (SessionMetadata) + re-exports escape utilities
 ├── shared/
 │   ├── escape.ts           # Isomorphic HTML escape utilities (browser + Worker)
+│   ├── html-document.ts    # Standalone HTML document builder (shared between client export + Worker)
 │   └── markdown.ts         # markdown-it config + extractTitle (used by BOTH client and Worker)
 ├── app/                    # Svelte 5 SPA (client)
 │   ├── main.ts             # Entry point + theme init
@@ -140,20 +144,29 @@ Build must produce: initial JS < 175kb gzipped. Verify with `npm run build`. KaT
 ```
 KV key:       nanoid(12) — URL-safe, cryptographically random
 KV value:     raw markdown string (max 512 KB)
-KV metadata:  { createdAt: number, updatedAt: number, editToken: string }
-KV TTL:       7,776,000 seconds (90 days) — reset on every save
+KV metadata:  { createdAt: number, updatedAt: number, editToken: string, private?: boolean, ttl?: number }
+KV TTL:       7,776,000 seconds (90 days) for browser sessions, 2,592,000 (30 days) for agent sessions — reset on every save
 ```
+
+`private` is backward-compatible: absent or `false` = public session. `ttl` is set at creation and preserved on update.
 
 ### API Surface
 | Method | Path | Auth | Behavior |
 |--------|------|------|----------|
-| GET | `/api/sessions/:id` | None | Read session. 404 if not found. Never returns editToken. |
-| PUT | `/api/sessions/:id` | Conditional | No token + new → CREATE (201 + editToken). Valid token + exists → UPDATE (200). Invalid/missing token + exists → 403. |
+| GET | `/api/sessions/:id` | Conditional | Read session. Private sessions require `X-Edit-Token` (returns 404 without — hides existence). Returns `{ id, content, metadata: { createdAt, updatedAt }, private }`. Never returns editToken. |
+| PUT | `/api/sessions/:id` | Conditional | Accepts `application/json` or `text/markdown` (raw body = content). Body or `X-Private: true` header sets privacy. No token + new → CREATE (201 + `{ id, editToken, private, url, editUrl }`). Valid token + exists → UPDATE (200). Turnstile is a fast-pass, not a gate — absent tokens skip verification (rate limiting fallback). |
 | DELETE | `/api/sessions/:id` | `X-Edit-Token` | Deletes session. 403 without valid token. |
 | POST | `/api/import-url` | Rate limited | Secure URL proxy. Body: `{ url }`. Returns `{ content }`. HTTPS only, Content-Type validated, UTF-8 verified, 512 KB limit, manual redirect handling. |
-| OPTIONS | `/api/*` | None | CORS preflight. `Access-Control-Allow-Headers` includes `X-Edit-Token`. |
+| OPTIONS | `/api/*` | None | CORS preflight. `Access-Control-Allow-Headers` includes `X-Edit-Token, X-Private`. |
 
 ID validation on all endpoints: `/^[A-Za-z0-9_-]{12}$/`. Reject 400 if invalid.
+
+### localStorage Keys
+| Key | Purpose |
+|-----|---------|
+| `markdown-viewer-theme` | Theme preference (light/dark/system) |
+| `markdown-viewer-line-wrap` | Word wrap toggle. Stored as `"true"`/`"false"`, defaults to `true`. |
+| `md-token:{id}` | Per-session edit tokens (one per session ID) |
 
 ### URL Import Security (11-step validation chain)
 The `POST /api/import-url` endpoint is the most security-sensitive feature. It acts as an HTTP proxy and must validate:

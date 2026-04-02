@@ -8,4 +8,7 @@ export type SaveState = 'idle' | 'saving' | 'saved' | 'error' | 'readonly';
 export type ThemeMode = 'system' | 'light' | 'dark';
 
 /** Content size relative to the server limit. */
-export type ContentSizeLevel = 'ok' | 'warning' | 'critical';
+export type SizeWarning = 'ok' | 'warning' | 'critical';
+
+/** Maximum content size in bytes (512 KB). Co-located with SizeWarning. */
+export const MAX_CONTENT_SIZE = 524_288;

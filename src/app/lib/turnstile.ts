@@ -40,6 +40,7 @@ declare global {
 let turnstileToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
 let initialized = false;
+let storedSiteKey: string | null = null; // cached for re-challenge after token consumption
 
 // ---------------------------------------------------------------------------
 // Internal
@@ -143,6 +144,7 @@ export function initTurnstile(): void {
   if (initialized) return; // Already initialized — skip
 
   initialized = true;
+  storedSiteKey = siteKey;
 
   // This promise covers the entire init: script loading + first challenge.
   // getTurnstileToken() awaits this until the first token is available.
@@ -191,4 +193,16 @@ export async function getTurnstileToken(): Promise<string | null> {
     tokenPromise,
     new Promise<null>((resolve) => setTimeout(() => resolve(null), HARD_TIMEOUT_MS)),
   ]);
+}
+
+/**
+ * Mark the current token as consumed (single-use) and kick off a
+ * re-challenge so the next `getTurnstileToken()` call gets a fresh token.
+ * Call this after a successful session creation (201).
+ */
+export function consumeToken(): void {
+  turnstileToken = null;
+  if (storedSiteKey) {
+    tokenPromise = runChallenge(storedSiteKey);
+  }
 }

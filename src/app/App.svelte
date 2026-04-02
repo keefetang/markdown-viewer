@@ -28,30 +28,35 @@
   import { extractTitle } from '../shared/markdown';
   import { PLACEHOLDER_MARKDOWN } from './lib/placeholder';
   import type { AutosaveHandle } from './lib/autosave';
-  import type { ViewMode, SaveState, ThemeMode, ContentSizeLevel } from './lib/types';
+  import { MAX_CONTENT_SIZE } from './lib/types';
+  import type { ViewMode, SaveState, ThemeMode, SizeWarning } from './lib/types';
 
   // ─── Constants ─────────────────────────────────────────────────────────────
 
   const VIEW_MODE_KEY = 'markdown-viewer-view-mode';
   const THEME_KEY = 'markdown-viewer-theme';
-  const NARROW_MQ = '(max-width: 767px)';
+  const LINE_WRAP_KEY = 'markdown-viewer-line-wrap';
+  // 959px covers all phone landscape orientations (iPhone Pro Max = 932px)
+  // and small tablets in portrait. Desktop toolbar needs ~1000px+ to fit.
+  const NARROW_MQ = '(max-width: 959px)';
   const SESSION_ID_RE = /^[A-Za-z0-9_-]{12}$/;
   const DELETE_UNDO_MS = 10_000;
   const FILE_ACCEPT = '.md,.markdown,.txt,.text';
-  const MAX_FILE_SIZE = 524_288; // 512 KB
-  const WARN_THRESHOLD = Math.floor(MAX_FILE_SIZE * 0.9);
-  const CRITICAL_THRESHOLD = Math.floor(MAX_FILE_SIZE * 0.95);
+  const WARN_THRESHOLD = Math.floor(MAX_CONTENT_SIZE * 0.9);
+  const CRITICAL_THRESHOLD = Math.floor(MAX_CONTENT_SIZE * 0.95);
 
   // ─── State ─────────────────────────────────────────────────────────────────
 
   let markdown = $state(PLACEHOLDER_MARKDOWN);
   let viewMode = $state<ViewMode>('split');
   let syncScroll = $state(true);
+  let lineWrap = $state(true);
   let saveState = $state<SaveState>('idle');
   let isReadOnly = $state(false);
   let isNarrow = $state(false);
   let themeMode = $state<ThemeMode>('system');
   let lastSavedAt = $state<number | null>(null);
+  let isPrivate = $state(false);
 
   // Toast state
   let toastMessage = $state('');
@@ -65,6 +70,7 @@
 
   // Delete undo state
   let deleteUndoContent: string | null = null;
+  let deleteUndoPrivate = false;
   let deleteUndoTimer: ReturnType<typeof setTimeout> | undefined;
   let undoInProgress = false;
 
@@ -90,7 +96,7 @@
   const textEncoder = new TextEncoder();
   let contentByteSize = $derived(textEncoder.encode(markdown).byteLength);
 
-  let contentSizeLevel = $derived<ContentSizeLevel>(
+  let sizeWarning = $derived<SizeWarning>(
     contentByteSize >= CRITICAL_THRESHOLD ? 'critical'
     : contentByteSize >= WARN_THRESHOLD ? 'warning'
     : 'ok'
@@ -138,18 +144,20 @@
     return null;
   }
 
-  function getBootstrapData(): { content: string; updatedAt?: number } | null {
+  function getBootstrapData(): { content: string; updatedAt?: number; private?: boolean } | null {
     const el = document.getElementById('__DATA__');
     if (!el?.textContent) return null;
     try {
       const data = JSON.parse(el.textContent) as {
         content?: string;
         metadata?: { updatedAt?: number };
+        private?: boolean;
       };
       if (typeof data.content === 'string') {
         return {
           content: data.content,
           updatedAt: typeof data.metadata?.updatedAt === 'number' ? data.metadata.updatedAt : undefined,
+          private: typeof data.private === 'boolean' ? data.private : undefined,
         };
       }
     } catch {
@@ -185,6 +193,7 @@
       if (bootstrap) {
         markdown = bootstrap.content;
         if (bootstrap.updatedAt) lastSavedAt = bootstrap.updatedAt;
+        if (bootstrap.private !== undefined) isPrivate = bootstrap.private;
       } else {
         void loadSession(routeId);
       }
@@ -209,6 +218,16 @@
       }
     } catch {
       // localStorage unavailable — follow system preference
+    }
+
+    // --- Line wrap ---
+    try {
+      const savedWrap = localStorage.getItem(LINE_WRAP_KEY);
+      if (savedWrap === 'false') {
+        lineWrap = false;
+      }
+    } catch {
+      // localStorage unavailable — default to wrap on
     }
 
     if (isReadOnly) {
@@ -239,16 +258,19 @@
         initialContent: markdown,
         onStateChange(state) {
           saveState = state;
+          if (state === 'readonly') isReadOnly = true;
         },
         onSessionCreated(id, token) {
           editToken = token;
           storeToken(id, token);
           history.replaceState(null, '', `/${id}`);
         },
-        onSaved(updatedAt) {
-          lastSavedAt = updatedAt;
+        onSaved(metadata) {
+          lastSavedAt = metadata.updatedAt;
         },
       });
+      // Sync private flag so autosave includes it in every PUT request
+      autosave.setPrivate(isPrivate);
     }
 
     // --- Keyboard shortcuts ---
@@ -283,13 +305,15 @@
 
   async function loadSession(id: string): Promise<void> {
     try {
-      const data = await getSession(id);
+      // Pass editToken so private sessions can be fetched
+      const data = await getSession(id, editToken ?? undefined);
       if (data === null) {
         showToast('Session not found or expired');
         history.replaceState(null, '', '/');
         sessionId = nanoid(12);
         editToken = null;
         isReadOnly = false;
+        isPrivate = false;
         markdown = PLACEHOLDER_MARKDOWN;
         saveState = 'idle';
 
@@ -298,14 +322,15 @@
           initialContent: markdown,
           onStateChange(state) {
             saveState = state;
+            if (state === 'readonly') isReadOnly = true;
           },
           onSessionCreated(newId, token) {
             editToken = token;
             storeToken(newId, token);
             history.replaceState(null, '', `/${newId}`);
           },
-          onSaved(updatedAt) {
-            lastSavedAt = updatedAt;
+          onSaved(metadata) {
+            lastSavedAt = metadata.updatedAt;
           },
         });
         return;
@@ -313,6 +338,7 @@
 
       markdown = data.content;
       lastSavedAt = data.metadata.updatedAt;
+      isPrivate = data.private;
     } catch {
       showToast('Failed to load session', { type: 'error' });
     }
@@ -371,6 +397,13 @@
     }
   }
 
+  // ─── Line wrap toggle ─────────────────────────────────────────────────────
+
+  function handleToggleLineWrap(): void {
+    lineWrap = !lineWrap;
+    try { localStorage.setItem(LINE_WRAP_KEY, String(lineWrap)); } catch { /* best effort */ }
+  }
+
   // ─── Sync scrolling ───────────────────────────────────────────────────────
 
   function handleEditorScroll(ratio: number): void {
@@ -393,6 +426,18 @@
 
     clearTimeout(scrollTimeout);
     scrollTimeout = setTimeout(() => { scrollSource = null; }, 50);
+  }
+
+  // ─── Private toggle ────────────────────────────────────────────────────────
+
+  function handleTogglePrivate(): void {
+    if (!editToken || !autosave) return;
+    isPrivate = !isPrivate;
+    autosave.setPrivate(isPrivate);
+    // save() updates pending params (id, content, token) that flush() → doSave() reads.
+    // flush() then clears the debounce timer and fires doSave() immediately.
+    autosave.save(sessionId, markdown, editToken);
+    void autosave.flush();
   }
 
   // ─── Content change ────────────────────────────────────────────────────────
@@ -421,7 +466,7 @@
     if (!file) return;
 
     // Size check before reading
-    if (file.size > MAX_FILE_SIZE) {
+    if (file.size > MAX_CONTENT_SIZE) {
       showToast('File too large (max 512 KB)', { type: 'error' });
       input.value = '';
       return;
@@ -483,9 +528,9 @@
     downloadHtml(markdown, extractTitle(markdown));
   }
 
-  /** Print to PDF via browser print dialog. */
+  /** Print full rendered markdown to PDF (bypasses split-pane layout). */
   function handleExportPdf(): void {
-    printToPdf();
+    printToPdf(markdown, extractTitle(markdown) || 'Untitled');
   }
 
   /** Copy rendered markdown as rich text. */
@@ -554,14 +599,14 @@
    * Create a new session with the given content: Turnstile check → save → store token.
    * Never throws — returns the new session info, or `null` on any failure.
    */
-  async function createNewSession(content: string): Promise<{ id: string; editToken: string } | null> {
+  async function createNewSession(content: string, sessionPrivate?: boolean): Promise<{ id: string; editToken: string } | null> {
     try {
       const newId = nanoid(12);
       let turnstileToken: string | null | undefined;
       if (isTurnstileConfigured()) {
         turnstileToken = await getTurnstileToken();
       }
-      const result = await saveSession(newId, content, undefined, turnstileToken);
+      const result = await saveSession(newId, content, undefined, turnstileToken, sessionPrivate);
       if ('editToken' in result) {
         const created = result as CreateResponse;
         storeToken(newId, created.editToken);
@@ -591,8 +636,9 @@
       return;
     }
 
-    // Hold content in memory for undo
+    // Hold content in memory for undo (including private flag)
     const savedContent = markdown;
+    const savedPrivate = isPrivate;
     const savedSessionId = sessionId;
 
     try {
@@ -609,6 +655,7 @@
 
     // Store content for undo
     deleteUndoContent = savedContent;
+    deleteUndoPrivate = savedPrivate;
 
     // Show undo toast — use a longer duration than the undo window so the
     // toast stays visible until the deleteUndoTimer handles both dismissal
@@ -627,6 +674,7 @@
     deleteUndoTimer = setTimeout(() => {
       if (undoInProgress) return; // undo is in-flight — don't navigate
       deleteUndoContent = null;
+      deleteUndoPrivate = false;
       dismissToast();
       window.location.href = '/';
     }, DELETE_UNDO_MS);
@@ -639,14 +687,16 @@
     dismissToast();
 
     const content = deleteUndoContent;
+    const savedPrivateFlag = deleteUndoPrivate;
     deleteUndoContent = null;
+    deleteUndoPrivate = false;
 
     if (!content) {
       window.location.href = '/';
       return;
     }
 
-    const created = await createNewSession(content);
+    const created = await createNewSession(content, savedPrivateFlag);
     if (!created) {
       showToast('Failed to restore session', { type: 'error' });
       // Still redirect to / since original is deleted
@@ -675,6 +725,8 @@
     onViewModeChange={handleViewModeChange}
     syncScrollEnabled={syncScroll}
     onSyncScrollToggle={() => { syncScroll = !syncScroll; }}
+    {lineWrap}
+    onToggleLineWrap={handleToggleLineWrap}
     {stats}
     {saveState}
     {isNarrow}
@@ -690,8 +742,10 @@
     onShareReadOnly={() => { void handleShareReadOnly(); }}
     onFork={() => { void handleFork(); }}
     onDelete={() => { void handleDelete(); }}
+    {isPrivate}
+    onTogglePrivate={handleTogglePrivate}
     {lastSavedAt}
-    {contentSizeLevel}
+    {sizeWarning}
     {contentSizeKB}
     {themeMode}
     onThemeToggle={handleThemeToggle}
@@ -705,6 +759,7 @@
             bind:this={editorRef}
             content={markdown}
             readonly={isReadOnly}
+            {lineWrap}
             onchange={handleContentChange}
             onscroll={handleEditorScroll}
           />
@@ -723,6 +778,7 @@
           bind:this={editorRef}
           content={markdown}
           readonly={isReadOnly}
+          {lineWrap}
           onchange={handleContentChange}
         />
       </div>

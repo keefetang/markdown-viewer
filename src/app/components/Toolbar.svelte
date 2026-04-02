@@ -3,29 +3,36 @@
    * Application toolbar — all action groups, responsive layout.
    *
    * Desktop (>767px): full row with logical groups:
-   *   [App Title | New] [Editor|Split|Preview] [Import|Export▾|Copy] [Share▾|Fork|Delete] [Sync] [Save State | Stats]
+   *   [App Title | New] [Editor|Split|Preview] [Import|Export▾|Copy] [Share▾|Fork|Delete] [Wrap] [Sync] [Save State | Stats]
    *
    * Mobile (≤767px): compact bar:
    *   [Editor|Split|Preview] [Share] [Save State] [...]
-   *   Overflow menu: Import, Export, Copy, Fork, Delete, Sync, Stats
+   *   Overflow menu: Import, Export, Copy, Fork, Delete, Sync, Wrap, Stats
    *
    * Design system: borders-only depth, warm paper surface, ink text.
    * All values via CSS custom properties.
    */
   import { onMount } from 'svelte';
+  import { fly, fade } from 'svelte/transition';
   import type { ContentStats } from '../lib/stats';
-  import type { ViewMode, SaveState, ThemeMode, ContentSizeLevel } from '../lib/types';
+  import type { ViewMode, SaveState, ThemeMode, SizeWarning } from '../lib/types';
   import { importUrl } from '../lib/api';
+
+  const reducedMotion = typeof window !== 'undefined'
+    ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    : false;
 
   interface Props {
     viewMode: ViewMode;
     onViewModeChange: (mode: ViewMode) => void;
     syncScrollEnabled: boolean;
     onSyncScrollToggle: () => void;
+    lineWrap?: boolean;
+    onToggleLineWrap?: () => void;
     stats: ContentStats;
     saveState: SaveState;
     lastSavedAt?: number | null;
-    contentSizeLevel?: ContentSizeLevel;
+    sizeWarning?: SizeWarning;
     contentSizeKB?: number;
     isNarrow?: boolean;
     isReadOnly?: boolean;
@@ -43,6 +50,8 @@
     onShareReadOnly: () => void;
     onFork: () => void;
     onDelete: () => void;
+    isPrivate?: boolean;
+    onTogglePrivate?: () => void;
   }
 
   let {
@@ -50,10 +59,12 @@
     onViewModeChange,
     syncScrollEnabled,
     onSyncScrollToggle,
+    lineWrap = true,
+    onToggleLineWrap,
     stats,
     saveState,
     lastSavedAt = null,
-    contentSizeLevel = 'ok',
+    sizeWarning = 'ok',
     contentSizeKB = 0,
     isNarrow = false,
     isReadOnly = false,
@@ -70,6 +81,8 @@
     onShareReadOnly,
     onFork,
     onDelete,
+    isPrivate = false,
+    onTogglePrivate,
   }: Props = $props();
 
   // ─── Dropdown state ──────────────────────────────────────────────────────
@@ -362,10 +375,26 @@
         >Share ▾</button>
         {#if openDropdown === 'share'}
           <div class="dropdown-menu" role="menu">
+            {#if !isReadOnly && onTogglePrivate}
+              <button
+                class="dropdown-item"
+                class:dropdown-item-active={isPrivate}
+                role="menuitem"
+                onclick={() => dropdownAction(onTogglePrivate)}
+              >Private: {isPrivate ? 'On' : 'Off'}</button>
+              <div class="dropdown-divider" role="separator"></div>
+            {/if}
             {#if !isReadOnly}
               <button class="dropdown-item" role="menuitem" onclick={() => dropdownAction(onShareEdit)}>Copy edit link</button>
             {/if}
-            <button class="dropdown-item" role="menuitem" onclick={() => dropdownAction(onShareReadOnly)}>Copy read-only link</button>
+            <button
+              class="dropdown-item"
+              class:dropdown-item-disabled={isPrivate}
+              role="menuitem"
+              onclick={() => { if (!isPrivate) dropdownAction(onShareReadOnly); }}
+              title={isPrivate ? 'Private sessions require the edit link' : ''}
+              aria-disabled={isPrivate}
+            >Copy read-only link</button>
           </div>
         {/if}
       </div>
@@ -373,12 +402,35 @@
       <button class="tool-btn" onclick={onFork} title="Fork session" aria-label="Fork session">Fork</button>
 
       {#if !isReadOnly}
-        <button class="tool-btn delete-btn" onclick={onDelete} title="Delete session" aria-label="Delete session">Delete</button>
+        <button class="tool-btn danger-btn" onclick={onDelete} title="Delete session" aria-label="Delete session">Delete</button>
       {/if}
     </div>
 
-    <!-- Right: Sync + Theme + Save + Stats -->
+    <!-- Left: Save state (last left-aligned element) -->
+    <div class="toolbar-group">
+      {#if isReadOnly}
+        <span class="readonly-badge">Read-only</span>
+      {:else if saveDisplayLabel}
+        <span class="save-indicator {saveClass}">{saveDisplayLabel}</span>
+      {/if}
+    </div>
+
+    <!-- Spacer pushes right-aligned groups to far right -->
+    <div class="toolbar-spacer"></div>
+
+    <!-- Right: View controls -->
     <div class="toolbar-group toolbar-right">
+      {#if onToggleLineWrap}
+        <button
+          class="sync-btn"
+          class:active={lineWrap}
+          onclick={onToggleLineWrap}
+          title="Toggle word wrap"
+          aria-label="Toggle word wrap"
+          aria-pressed={lineWrap}
+        >Wrap</button>
+      {/if}
+
       {#if viewMode === 'split'}
         <button
           class="sync-btn"
@@ -389,7 +441,10 @@
           aria-pressed={syncScrollEnabled}
         >Sync</button>
       {/if}
+    </div>
 
+    <!-- Right: Theme -->
+    <div class="toolbar-group">
       {#if onThemeToggle}
         <button
           class="theme-btn"
@@ -398,15 +453,12 @@
           aria-label={themeTitle}
         >{themeIcon}</button>
       {/if}
+    </div>
 
-      {#if isReadOnly}
-        <span class="readonly-badge">Read-only</span>
-      {:else if saveDisplayLabel}
-        <span class="save-indicator {saveClass}">{saveDisplayLabel}</span>
-      {/if}
-
-      {#if contentSizeLevel !== 'ok'}
-        <span class="size-warning" class:size-critical={contentSizeLevel === 'critical'}>
+    <!-- Right: Stats -->
+    <div class="toolbar-group">
+      {#if sizeWarning !== 'ok'}
+        <span class="size-warning" class:size-critical={sizeWarning === 'critical'}>
           {contentSizeKB} KB / 512 KB
         </span>
       {/if}
@@ -458,7 +510,7 @@
       {/if}
     </div>
 
-    <!-- Right: Overflow menu -->
+    <!-- Right: Overflow trigger -->
     <div class="toolbar-group overflow-wrap">
       <button
         class="tool-btn overflow-trigger"
@@ -469,84 +521,127 @@
         aria-label="More actions"
         title="More actions"
       >&#x22EF;</button>
-
-      {#if openDropdown === 'overflow'}
-        <div class="dropdown-menu dropdown-menu-right overflow-menu" role="menu">
-          <button class="dropdown-item" role="menuitem" onclick={() => dropdownAction(onNew)}>New session</button>
-
-          {#if !isReadOnly}
-            <button class="dropdown-item" role="menuitem" onclick={() => dropdownAction(onImport)}>Import from file</button>
-            {#if !showUrlInput}
-              <button class="dropdown-item" role="menuitem" onclick={openUrlInput}>Import from URL</button>
-            {:else}
-              <div class="url-input-panel url-input-panel-mobile" role="none">
-                <!-- svelte-ignore a11y_autofocus -->
-                <input
-                  class="url-input"
-                  type="url"
-                  placeholder="https://..."
-                  bind:value={urlInputValue}
-                  onkeydown={handleUrlKeydown}
-                  disabled={urlLoading}
-                  autofocus
-                />
-                <button
-                  class="url-import-btn"
-                  onclick={() => { void handleUrlImport(); }}
-                  disabled={urlLoading}
-                >{urlLoading ? 'Importing\u2026' : 'Import'}</button>
-                {#if urlError}
-                  <p class="url-error">{urlError}</p>
-                {/if}
-              </div>
-            {/if}
-          {/if}
-
-          <div class="dropdown-divider" role="separator"></div>
-
-          <button class="dropdown-item" role="menuitem" onclick={() => dropdownAction(onExportMd)}>Export Markdown</button>
-          <button class="dropdown-item" role="menuitem" onclick={() => dropdownAction(onExportHtml)}>Export HTML</button>
-          <button class="dropdown-item" role="menuitem" onclick={() => dropdownAction(onExportPdf)}>Export PDF</button>
-          <button class="dropdown-item" role="menuitem" onclick={() => dropdownAction(onCopyRendered)}>Copy rendered</button>
-
-          <div class="dropdown-divider" role="separator"></div>
-
-          {#if !isReadOnly}
-            <button class="dropdown-item" role="menuitem" onclick={() => dropdownAction(onShareEdit)}>Copy edit link</button>
-          {/if}
-          <button class="dropdown-item" role="menuitem" onclick={() => dropdownAction(onShareReadOnly)}>Copy read-only link</button>
-          <button class="dropdown-item" role="menuitem" onclick={() => dropdownAction(onFork)}>Fork session</button>
-
-          {#if !isReadOnly}
-            <div class="dropdown-divider" role="separator"></div>
-            <button class="dropdown-item dropdown-item-danger" role="menuitem" onclick={() => dropdownAction(onDelete)}>Delete session</button>
-          {/if}
-
-          <div class="dropdown-divider" role="separator"></div>
-
-          <button class="dropdown-item" role="menuitem" onclick={() => dropdownAction(onSyncScrollToggle)}>
-            Sync scroll {syncScrollEnabled ? '(on)' : '(off)'}
-          </button>
-
-          {#if onThemeToggle}
-            <button class="dropdown-item" role="menuitem" onclick={() => { if (onThemeToggle) dropdownAction(onThemeToggle); }}>
-              {themeIcon} {themeMode === 'dark' ? 'Light mode' : themeMode === 'light' ? 'System theme' : 'Toggle theme'}
-            </button>
-          {/if}
-
-          <div class="dropdown-meta">
-            {stats.words}w · {stats.chars}c · {stats.readTime}m read
-            {#if contentSizeLevel !== 'ok'}
-              <span class="size-warning-mobile" class:size-critical={contentSizeLevel === 'critical'}>
-                · {contentSizeKB} KB / 512 KB
-              </span>
-            {/if}
-          </div>
-        </div>
-      {/if}
     </div>
   {/if}
 </header>
+
+<!-- ═══════════════════════════════════════════════════════
+     MOBILE BOTTOM SHEET — rendered outside toolbar to escape overflow-x: auto
+     ═══════════════════════════════════════════════════════ -->
+{#if isNarrow && openDropdown === 'overflow'}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="sheet-backdrop"
+    onclick={closeDropdowns}
+    onkeydown={(e) => { if (e.key === 'Escape') closeDropdowns(); }}
+    aria-hidden="true"
+    transition:fade={{ duration: reducedMotion ? 0 : 150 }}
+  ></div>
+  <!-- svelte-ignore a11y_interactive_supports_focus -->
+  <div
+    class="sheet"
+    role="menu"
+    aria-label="More actions"
+    onkeydown={(e) => { if (e.key === 'Escape') closeDropdowns(); }}
+    transition:fly={{ y: 300, duration: reducedMotion ? 0 : 200 }}
+  >
+    <div class="sheet-handle" aria-hidden="true"></div>
+    <div class="sheet-content">
+      <button class="sheet-item" role="menuitem" onclick={() => dropdownAction(onNew)}>New session</button>
+
+      {#if !isReadOnly}
+        <button class="sheet-item" role="menuitem" onclick={() => dropdownAction(onImport)}>Import from file</button>
+        {#if !showUrlInput}
+          <button class="sheet-item" role="menuitem" onclick={openUrlInput}>Import from URL</button>
+        {:else}
+          <div class="url-input-panel url-input-panel-mobile" role="none">
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              class="url-input"
+              type="url"
+              placeholder="https://..."
+              bind:value={urlInputValue}
+              onkeydown={handleUrlKeydown}
+              disabled={urlLoading}
+              autofocus
+            />
+            <button
+              class="url-import-btn"
+              onclick={() => { void handleUrlImport(); }}
+              disabled={urlLoading}
+            >{urlLoading ? 'Importing\u2026' : 'Import'}</button>
+            {#if urlError}
+              <p class="url-error">{urlError}</p>
+            {/if}
+          </div>
+        {/if}
+      {/if}
+
+      <div class="sheet-divider" role="separator"></div>
+
+      <button class="sheet-item" role="menuitem" onclick={() => dropdownAction(onExportMd)}>Export Markdown</button>
+      <button class="sheet-item" role="menuitem" onclick={() => dropdownAction(onExportHtml)}>Export HTML</button>
+      <button class="sheet-item" role="menuitem" onclick={() => dropdownAction(onExportPdf)}>Export PDF</button>
+      <button class="sheet-item" role="menuitem" onclick={() => dropdownAction(onCopyRendered)}>Copy rendered</button>
+
+      <div class="sheet-divider" role="separator"></div>
+
+      {#if !isReadOnly && onTogglePrivate}
+        <button
+          class="sheet-item"
+          class:sheet-item-active={isPrivate}
+          role="menuitem"
+          onclick={() => dropdownAction(onTogglePrivate)}
+        >Private: {isPrivate ? 'On' : 'Off'}</button>
+      {/if}
+
+      {#if !isReadOnly}
+        <button class="sheet-item" role="menuitem" onclick={() => dropdownAction(onShareEdit)}>Copy edit link</button>
+      {/if}
+      <button
+        class="sheet-item"
+        class:sheet-item-disabled={isPrivate}
+        role="menuitem"
+        onclick={() => { if (!isPrivate) dropdownAction(onShareReadOnly); }}
+        title={isPrivate ? 'Private sessions require the edit link' : ''}
+        aria-disabled={isPrivate}
+      >Copy read-only link</button>
+      <button class="sheet-item" role="menuitem" onclick={() => dropdownAction(onFork)}>Fork session</button>
+
+      {#if !isReadOnly}
+        <div class="sheet-divider" role="separator"></div>
+        <button class="sheet-item sheet-item-danger" role="menuitem" onclick={() => dropdownAction(onDelete)}>Delete session</button>
+      {/if}
+
+      <div class="sheet-divider" role="separator"></div>
+
+      <button class="sheet-item" role="menuitem" onclick={() => dropdownAction(onSyncScrollToggle)}>
+        Sync scroll {syncScrollEnabled ? '(on)' : '(off)'}
+      </button>
+
+      {#if onToggleLineWrap}
+        <button class="sheet-item" role="menuitem" onclick={() => { if (onToggleLineWrap) dropdownAction(onToggleLineWrap); }}>
+          Word wrap: {lineWrap ? 'On' : 'Off'}
+        </button>
+      {/if}
+
+      {#if onThemeToggle}
+        <button class="sheet-item" role="menuitem" onclick={() => { if (onThemeToggle) dropdownAction(onThemeToggle); }}>
+          {themeIcon} {themeMode === 'dark' ? 'Light mode' : themeMode === 'light' ? 'System theme' : 'Toggle theme'}
+        </button>
+      {/if}
+
+      <div class="sheet-meta">
+        {stats.words}w · {stats.chars}c · {stats.readTime}m read
+        {#if sizeWarning !== 'ok'}
+          <span class="size-warning-mobile" class:size-critical={sizeWarning === 'critical'}>
+            · {contentSizeKB} KB / 512 KB
+          </span>
+        {/if}
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   /* ── Toolbar shell ── */
@@ -559,6 +654,7 @@
     background: var(--paper-above);
     border-bottom: 1px solid var(--pencil);
     flex-shrink: 0;
+    min-width: 0; /* allow flex parent to constrain width below content size */
     z-index: var(--z-toolbar);
     gap: var(--space-sm);
     min-height: 44px;
@@ -572,10 +668,21 @@
     gap: var(--space-xs);
   }
 
+  /* Vertical dividers between adjacent groups (desktop) */
+  .toolbar-group + .toolbar-group {
+    margin-left: var(--space-xs);
+    padding-left: var(--space-sm);
+    border-left: 1px solid var(--pencil-subtle);
+  }
+
+  /* Spacer pushes .toolbar-right to far right — intentionally breaks
+     the group + group separator chain (whitespace, not border) */
+  .toolbar-spacer {
+    flex: 1;
+  }
+
   .toolbar-right {
     gap: var(--space-sm);
-    justify-content: flex-end;
-    margin-left: auto;
   }
 
   /* ── App title ── */
@@ -585,7 +692,6 @@
     font-weight: var(--weight-semibold);
     letter-spacing: var(--tracking-wide);
     color: var(--ink-secondary);
-    text-transform: uppercase;
     white-space: nowrap;
     margin-right: var(--space-xs);
   }
@@ -666,15 +772,18 @@
     font-size: var(--text-xs);
   }
 
-  /* ── Delete button — destructive styling ── */
+  /* ── Danger button (delete) — red text at rest, red bg on hover ── */
 
-  .delete-btn {
+  .danger-btn {
     color: var(--mark-error);
   }
 
-  .delete-btn:hover {
-    color: var(--mark-error);
-    background: color-mix(in srgb, var(--mark-error) 8%, transparent);
+  .danger-btn:hover {
+    background: color-mix(in srgb, var(--mark-error) 12%, transparent);
+  }
+
+  .danger-btn:focus-visible {
+    outline-color: var(--mark-error);
   }
 
   /* ── Sync scroll button ── */
@@ -781,6 +890,20 @@
     outline: none;
   }
 
+  .dropdown-item-active {
+    color: var(--margin-note);
+    font-weight: var(--weight-medium);
+  }
+
+  .dropdown-item-disabled {
+    color: var(--ink-faint);
+    cursor: not-allowed;
+  }
+
+  .dropdown-item-disabled:hover {
+    background: none;
+  }
+
   .dropdown-item-danger {
     color: var(--mark-error);
   }
@@ -823,10 +946,6 @@
     font-size: var(--text-md);
     letter-spacing: 0.1em;
     padding: var(--space-xs) var(--space-sm);
-  }
-
-  .overflow-menu {
-    min-width: 180px;
   }
 
   /* ── Save indicator ── */
@@ -980,5 +1099,106 @@
     line-height: var(--leading-snug);
     word-break: break-word;
     white-space: normal;
+  }
+
+  /* ── Bottom sheet (mobile overflow) ── */
+
+  .sheet-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: var(--z-overlay);
+  }
+
+  .sheet {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    max-height: 70dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: var(--paper-above);
+    border-top-left-radius: var(--radius-lg);
+    border-top-right-radius: var(--radius-lg);
+    z-index: calc(var(--z-overlay) + 1);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .sheet-handle {
+    width: 40px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--pencil-strong);
+    margin: var(--space-sm) auto;
+  }
+
+  .sheet-content {
+    padding: 0 0 var(--space-sm);
+  }
+
+  .sheet-item {
+    width: 100%;
+    background: none;
+    border: none;
+    padding: var(--space-sm) var(--space-base);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    font-weight: var(--weight-normal);
+    color: var(--ink);
+    cursor: pointer;
+    text-align: left;
+    white-space: nowrap;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    transition:
+      color var(--duration-fast) var(--ease-out),
+      background-color var(--duration-fast) var(--ease-out);
+    line-height: var(--leading-snug);
+  }
+
+  .sheet-item:hover {
+    background: var(--paper-inset);
+  }
+
+  .sheet-item:focus-visible {
+    background: var(--paper-inset);
+    outline: none;
+  }
+
+  .sheet-item-active {
+    color: var(--margin-note);
+    font-weight: var(--weight-medium);
+  }
+
+  .sheet-item-disabled {
+    color: var(--ink-faint);
+    cursor: not-allowed;
+  }
+
+  .sheet-item-disabled:hover {
+    background: none;
+  }
+
+  .sheet-item-danger {
+    color: var(--mark-error);
+  }
+
+  .sheet-item-danger:hover {
+    background: color-mix(in srgb, var(--mark-error) 8%, transparent);
+  }
+
+  .sheet-divider {
+    height: 1px;
+    background: var(--pencil);
+    margin: var(--space-xs) 0;
+  }
+
+  .sheet-meta {
+    padding: var(--space-sm) var(--space-base);
+    font-size: var(--text-xs);
+    color: var(--ink-muted);
+    font-variant-numeric: tabular-nums;
   }
 </style>

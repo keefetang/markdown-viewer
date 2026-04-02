@@ -22,11 +22,72 @@
   height: 100%;
 }
 
-/* Scrollbar styling inherited from global.css (* selector).
-   CM6's .cm-scroller is a regular DOM element — global styles apply. */
+.editor-container .cm-editor.cm-focused {
+  outline: none;
+}
+
+/* ================================================================
+   Scroller
+   ================================================================ */
 
 .editor-container .cm-scroller {
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden; /* Word wrap on by default — no horizontal content. Prevents iOS Safari elastic bounce. */
+  overscroll-behavior: contain; /* Prevent scroll chaining to parent */
+  line-height: var(--leading-relaxed);
+  font-family: var(--font-mono);
+}
+
+/* ================================================================
+   Gutters — !important required: CM6 generates .ͼN .cm-gutters
+   with hardcoded light-mode colors that win the specificity race.
+   ================================================================ */
+
+.editor-container .cm-gutters {
+  background: var(--paper-inset) !important;
+  border-right: 1px solid var(--pencil-subtle) !important;
+  color: var(--ink-muted) !important;
+  min-width: 2.5rem;
+  font-size: var(--text-sm);
+}
+
+.editor-container .cm-lineNumbers .cm-gutterElement {
+  padding: 0 var(--space-sm) 0 var(--space-xs);
+  min-width: 3ch;
+  text-align: right;
+}
+
+.editor-container .cm-activeLine {
+  background: var(--pencil-subtle);
+}
+
+.editor-container .cm-activeLineGutter {
+  background: var(--pencil-subtle);
+  color: var(--ink-secondary);
+}
+
+/* ================================================================
+   Selection & cursor — !important required: CM6 applies these
+   via inline styles which have higher specificity than any selector.
+   ================================================================ */
+
+.editor-container .cm-selectionBackground,
+.editor-container .cm-focused .cm-selectionBackground {
+  background: color-mix(in srgb, var(--margin-note) 20%, transparent) !important;
+}
+
+.editor-container .cm-cursor,
+.editor-container .cm-dropCursor {
+  border-left-color: var(--margin-note) !important;
+}
+
+/* ================================================================
+   Placeholder
+   ================================================================ */
+
+.editor-container .cm-placeholder {
+  color: var(--ink-faint);
+  font-style: italic;
 }
 
 /* ================================================================

@@ -15,6 +15,8 @@ A markdown pad that's fast, private, and yours to deploy. No accounts, no cookie
 - **Split-pane editing** — CodeMirror 6 with markdown syntax highlighting and resizable divider
 - **Three view modes** — Editor only, Split (side-by-side), or Preview only
 - **Synchronized scrolling** — Editor and preview scroll together (toggle-able)
+- **Word wrap** — Toggle-able, on by default, persisted across sessions
+- **Search & replace** — Cmd+F / Ctrl+F with match highlighting
 - **Content stats** — Live word count, character count, and estimated read time
 
 ### Markdown
@@ -28,9 +30,10 @@ A markdown pad that's fast, private, and yours to deploy. No accounts, no cookie
 
 - **Auto-save** — Content saves to server with debounce, URL updates automatically
 - **Shareable sessions** — Edit links (with write access) and read-only links
+- **Private sessions** — Token-gated viewing. Private sessions require the edit link to access
 - **Fork** — Read-only visitors can fork any session into their own editable copy
 - **Link previews** — Shared links unfurl with content preview in Slack, Discord, and social media
-- **90-day retention** — Sessions expire after 90 days of inactivity
+- **90-day retention** — Sessions expire after 90 days of inactivity (30 days for agent-created)
 
 ### Import / Export
 
@@ -39,7 +42,45 @@ A markdown pad that's fast, private, and yours to deploy. No accounts, no cookie
 - **Download** — Save as Markdown, HTML, or PDF
 - **Clipboard** — Copy rendered content as rich text
 
-Dark mode (system + manual override), mobile responsive layout, and keyboard shortcuts for all primary actions.
+### Agent / API Access
+
+AI agents and scripts can create, update, and read sessions via pure HTTP — no SDK, no browser, no API key.
+
+```bash
+# Create a session (body is raw markdown)
+curl -X PUT https://markdown.pentagram.me/api/sessions/$(openssl rand -base64 9 | tr '+/' '_-') \
+  -H "Content-Type: text/markdown" \
+  --data-binary @draft.md
+
+# Update a session
+curl -X PUT https://markdown.pentagram.me/api/sessions/SESSION_ID \
+  -H "Content-Type: text/markdown" \
+  -H "X-Edit-Token: TOKEN" \
+  --data-binary @updated.md
+
+# Read as markdown
+curl -H "Accept: text/markdown" https://markdown.pentagram.me/SESSION_ID
+
+# Read as rendered HTML
+curl "https://markdown.pentagram.me/SESSION_ID?format=html" > note.html
+
+# Create a private session
+curl -X PUT https://markdown.pentagram.me/api/sessions/SESSION_ID \
+  -H "Content-Type: text/markdown" \
+  -H "X-Private: true" \
+  --data-binary "# Private draft"
+```
+
+Creation returns `{ id, editToken, url, editUrl }`. Agent-created sessions (no Turnstile token) get 30-day retention; browser-created sessions get 90 days. Rate limiting is the only gate — no API key required.
+
+### SEO & Content Negotiation
+
+- **Crawler-friendly index** — OG meta tags and feature description injected via HTMLRewriter
+- **`Accept: text/markdown`** on `/:id` returns raw markdown content
+- **`?format=html`** on `/:id` returns standalone rendered HTML with inline styles
+- **`?format=md`** on `/:id` returns raw markdown (alias for Accept header)
+
+Dark mode (system + manual override), mobile responsive layout with bottom sheet menu, and keyboard shortcuts for all primary actions.
 
 ## 🚀 Deploy to Cloudflare
 
@@ -113,13 +154,14 @@ wrangler secret put TURNSTILE_SECRET_KEY
 - **Frontend:** Svelte 5, CodeMirror 6, markdown-it, highlight.js, KaTeX (lazy-loaded), DOMPurify
 - **Backend:** Cloudflare Workers + Static Assets + KV
 - **Build:** Vite, TypeScript
-- **Bundle:** ~88kb gzipped initial load — KaTeX math rendering lazy-loaded only when needed (~290kb)
+- **Bundle:** ~79kb gzipped initial load — KaTeX math rendering lazy-loaded only when needed (~293kb)
 
 ## 🔒 Security
 
 - **Edit tokens** — Random tokens protect write access per session
+- **Private sessions** — Token-gated viewing prevents unauthorized access (returns 404, not 403)
 - **Rate limiting** — All API endpoints are rate-limited (30 writes/min, 60 reads/min)
-- **Turnstile** — Optional invisible bot protection on session creation
+- **Turnstile** — Optional bot protection on browser session creation. Agents bypass via rate limiting
 - **DOMPurify** — All rendered HTML sanitized against XSS
 - **URL import protection** — Server-side proxy with 11-step SSRF validation chain (protocol, hostname, DNS rebinding, IP range, redirects, content type, size limits)
 - **Security headers** — CSP with per-request nonces, Referrer-Policy, and other hardened defaults
@@ -128,7 +170,7 @@ wrangler secret put TURNSTILE_SECRET_KEY
 ## 🔐 Privacy
 
 - **No cookies.** No user tracking. No personal data collected or stored.
-- **Stored per session:** Markdown content, two timestamps (created/updated), and a random edit token (not tied to any user).
+- **Stored per session:** Markdown content, two timestamps (created/updated), a random edit token (not tied to any user), and an optional private flag.
 - **Analytics:** Optional Cloudflare Web Analytics — cookie-free and GDPR-compliant.
 - **Note:** Cloudflare's platform provides standard request logs (including IPs) to the account owner. This app does not log them, but the platform makes them available.
 

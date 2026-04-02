@@ -5,6 +5,8 @@
  * The `X-Edit-Token` header is included only when a token is provided.
  */
 
+import { consumeToken } from './turnstile';
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -13,6 +15,7 @@ export interface SessionData {
   id: string;
   content: string;
   metadata: { createdAt: number; updatedAt: number };
+  private: boolean;
 }
 
 /** Server response for session creation (PUT without token, 201). */
@@ -20,12 +23,14 @@ export interface CreateResponse {
   id: string;
   editToken: string;
   metadata: { createdAt: number; updatedAt: number };
+  private: boolean;
 }
 
 /** Server response for session update (PUT with token, 200). */
 export interface UpdateResponse {
   id: string;
   metadata: { createdAt: number; updatedAt: number };
+  private: boolean;
 }
 
 /** Error subclass for API errors that carry an HTTP status code. */
@@ -57,10 +62,16 @@ function tokenHeaders(editToken?: string): Record<string, string> {
 
 /**
  * Fetch an existing session by ID.
- * Returns `null` on 404 (session not found or expired).
+ * Returns `null` on 404 (session not found, expired, or private without valid token).
+ * Pass `editToken` to authenticate access to private sessions.
  */
-export async function getSession(id: string): Promise<SessionData | null> {
-  const res = await fetch(`/api/sessions/${id}`);
+export async function getSession(id: string, editToken?: string): Promise<SessionData | null> {
+  const headers: Record<string, string> = {};
+  if (editToken) {
+    headers['X-Edit-Token'] = editToken;
+  }
+
+  const res = await fetch(`/api/sessions/${id}`, { headers });
 
   if (res.status === 404) return null;
 
@@ -78,6 +89,10 @@ export async function getSession(id: string): Promise<SessionData | null> {
  *   Optionally includes a `turnstileToken` for bot verification on creation.
  * - With `editToken`: updates an existing session → returns `UpdateResponse`.
  *
+ * Pass `isPrivate` to set or update the private flag. Omit to preserve the
+ * server's existing value on update (the server only changes `private` when
+ * the field is explicitly present in the body).
+ *
  * Throws `ApiError` on failure (403, 413, 429, etc.).
  */
 export async function saveSession(
@@ -85,11 +100,15 @@ export async function saveSession(
   content: string,
   editToken?: string,
   turnstileToken?: string | null,
+  isPrivate?: boolean,
 ): Promise<CreateResponse | UpdateResponse> {
   // Include turnstileToken in the body only for creation requests (no editToken)
-  const body: Record<string, string> = { content };
+  const body: Record<string, string | boolean> = { content };
   if (!editToken && turnstileToken) {
     body.turnstileToken = turnstileToken;
+  }
+  if (isPrivate !== undefined) {
+    body.private = isPrivate;
   }
 
   const res = await fetch(`/api/sessions/${id}`, {
@@ -100,6 +119,13 @@ export async function saveSession(
 
   if (!res.ok) {
     throw new ApiError(res.status, `PUT /api/sessions/${id} failed: ${res.status}`);
+  }
+
+  // Turnstile tokens are single-use. After a successful creation (201),
+  // clear the cached token and re-challenge so the next creation (fork,
+  // delete-undo) gets a fresh token.
+  if (res.status === 201) {
+    consumeToken();
   }
 
   return (await res.json()) as CreateResponse | UpdateResponse;

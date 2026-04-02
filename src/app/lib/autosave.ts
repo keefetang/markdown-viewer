@@ -33,8 +33,8 @@ export interface AutosaveOptions {
   onStateChange: (state: SaveState) => void;
   /** Called after the first successful save (session creation). */
   onSessionCreated: (id: string, token: string) => void;
-  /** Called after every successful save with the server-reported updatedAt timestamp. */
-  onSaved?: (updatedAt: number) => void;
+  /** Called after every successful save with the server-reported metadata. */
+  onSaved?: (metadata: { createdAt: number; updatedAt: number }) => void;
 }
 
 export interface AutosaveHandle {
@@ -42,6 +42,8 @@ export interface AutosaveHandle {
   save: (id: string, content: string, editToken: string | null) => void;
   /** Flush: save immediately, bypassing debounce (e.g. Cmd+S). */
   flush: () => Promise<void>;
+  /** Update the private flag included in every subsequent PUT request. */
+  setPrivate: (value: boolean) => void;
   /** Tear down timers. */
   destroy: () => void;
 }
@@ -62,6 +64,10 @@ export function createAutosave(options: AutosaveOptions): AutosaveHandle {
   let pendingId: string | null = null;
   let pendingContent: string | null = null;
   let pendingToken: string | null = null;
+
+  // Private flag — included in every PUT request so the server preserves it
+  let privateFlag: boolean | undefined;
+  let lastSavedPrivate: boolean | undefined;
 
   // Concurrency guard — prevents overlapping save requests.
   // Set synchronously before the first `await`, cleared in `finally`.
@@ -84,8 +90,8 @@ export function createAutosave(options: AutosaveOptions): AutosaveHandle {
       return;
     }
 
-    // Skip if content hasn't changed since last successful save
-    if (pendingContent === lastSavedContent) return;
+    // Skip if content and private flag haven't changed since last successful save
+    if (pendingContent === lastSavedContent && privateFlag === lastSavedPrivate) return;
 
     const id = pendingId;
     const content = pendingContent;
@@ -102,7 +108,7 @@ export function createAutosave(options: AutosaveOptions): AutosaveHandle {
         turnstileToken = await getTurnstileToken();
       }
 
-      const result = await saveSession(id, content, token ?? undefined, turnstileToken);
+      const result = await saveSession(id, content, token ?? undefined, turnstileToken, privateFlag);
 
       // Creation response includes editToken — update pending token so
       // subsequent saves use it instead of creating again.
@@ -113,8 +119,9 @@ export function createAutosave(options: AutosaveOptions): AutosaveHandle {
       }
 
       lastSavedContent = content;
+      lastSavedPrivate = privateFlag;
       setState('saved');
-      options.onSaved?.(result.metadata.updatedAt);
+      options.onSaved?.(result.metadata);
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 403) {
@@ -163,10 +170,14 @@ export function createAutosave(options: AutosaveOptions): AutosaveHandle {
     await doSave();
   }
 
+  function setPrivate(value: boolean): void {
+    privateFlag = value;
+  }
+
   function destroy(): void {
     clearTimeout(debounceTimer);
     clearTimeout(retryTimer);
   }
 
-  return { save, flush, destroy };
+  return { save, flush, setPrivate, destroy };
 }

@@ -30,6 +30,7 @@ interface BootstrapData {
     createdAt: number;
     updatedAt: number;
   };
+  private: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +163,18 @@ export async function handleSession(request: Request, env: Env, nonce: string): 
     return Response.redirect(`${url.origin}/`, 302);
   }
 
+  // Private sessions: serve the bare SPA shell with no SSR content.
+  // The hash fragment (with edit token) never reaches the server, so we
+  // can't validate access here. The SPA will boot, extract the token from
+  // hash/localStorage, fetch via API (with X-Edit-Token), and either
+  // succeed or redirect to `/`.
+  if (metadata.private) {
+    const shellResponse = await env.ASSETS.fetch(new Request(`${url.origin}/index.html`));
+    return new HTMLRewriter()
+      .on('script', new NonceInjector(nonce))
+      .transform(shellResponse);
+  }
+
   // Render markdown
   const renderedHtml = renderMarkdown(content);
 
@@ -178,6 +191,7 @@ export async function handleSession(request: Request, env: Env, nonce: string): 
       createdAt: metadata.createdAt,
       updatedAt: metadata.updatedAt,
     },
+    private: false, // Only public sessions reach this code path (private bails early)
   };
 
   // CRITICAL: Escape ALL `<` to prevent </script> injection attacks

@@ -14,13 +14,13 @@
   import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
   import { tags } from '@lezer/highlight';
   import { HighlightStyle } from '@codemirror/language';
-  import '../styles/editor.css';
 
   // ─── Props (Svelte 5 runes) ──────────────────────────────────────────────
 
   interface Props {
     content?: string;
     readonly?: boolean;
+    lineWrap?: boolean;
     onchange?: (content: string) => void;
     onscroll?: (ratio: number) => void;
   }
@@ -28,6 +28,7 @@
   let {
     content = $bindable(''),
     readonly = false,
+    lineWrap = true,
     onchange,
     onscroll,
   }: Props = $props();
@@ -36,10 +37,11 @@
 
   let containerEl: HTMLDivElement;
   let view: EditorView | undefined;
-  // Compartment allows reconfiguring readOnly without recreating the entire
+  // Compartments allow reconfiguring extensions without recreating the entire
   // EditorState — CM6's immutable state model requires this pattern for any
   // extension that changes after initialization.
   const readOnlyCompartment = new Compartment();
+  const wrapCompartment = new Compartment();
 
   /**
    * Tracks the last content string that was synced between the prop and CM6.
@@ -55,7 +57,7 @@
       backgroundColor: 'var(--paper-inset)',
       color: 'var(--ink)',
       fontFamily: 'var(--font-mono)',
-      fontSize: 'var(--text-base)',
+      fontSize: 'var(--text-sm)',
     },
     '.cm-content': {
       caretColor: 'var(--margin-note)',
@@ -158,6 +160,9 @@
         // Read-only (reconfigurable via compartment)
         readOnlyCompartment.of(EditorState.readOnly.of(readonly)),
 
+        // Line wrapping (reconfigurable via compartment)
+        wrapCompartment.of(lineWrap ? EditorView.lineWrapping : []),
+
         // Theme
         editorTheme,
 
@@ -211,6 +216,14 @@
     if (!view) return;
     view.dispatch({
       effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(readonly)),
+    });
+  });
+
+  // Line wrap toggle via compartment reconfigure
+  $effect(() => {
+    if (!view) return;
+    view.dispatch({
+      effects: wrapCompartment.reconfigure(lineWrap ? EditorView.lineWrapping : []),
     });
   });
 
