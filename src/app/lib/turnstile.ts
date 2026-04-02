@@ -70,34 +70,44 @@ function removeTurnstileContainer(container: HTMLDivElement): void {
 
 /**
  * Run a Turnstile challenge. Assumes `window.turnstile` is already loaded.
- * Sets `tokenPromise` to a new promise that resolves with the challenge token.
- * Called on initial load and on token expiry (re-challenge without reloading the script).
+ * Returns a promise that resolves with the challenge token (or null on
+ * failure/timeout). On token expiry, re-challenges silently and updates
+ * the module-level `tokenPromise` for future callers.
  */
-function runChallenge(siteKey: string): void {
+function runChallenge(siteKey: string): Promise<string | null> {
   turnstileToken = null;
 
   const container = createTurnstileContainer();
 
-  tokenPromise = new Promise<string | null>((resolve) => {
-    window.turnstile!.render(container, {
-      sitekey: siteKey,
-      callback: (token: string) => {
-        turnstileToken = token;
-        removeTurnstileContainer(container);
-        resolve(token);
-      },
-      'error-callback': () => {
-        // Graceful degradation — proceed without token
-        removeTurnstileContainer(container);
-        resolve(null);
-      },
-      'expired-callback': () => {
-        // Token expired — clean up old container, re-challenge silently
-        removeTurnstileContainer(container);
-        runChallenge(siteKey);
-      },
-      size: 'invisible',
-    });
+  return new Promise<string | null>((resolve) => {
+    try {
+      window.turnstile!.render(container, {
+        sitekey: siteKey,
+        callback: (token: string) => {
+          turnstileToken = token;
+          removeTurnstileContainer(container);
+          resolve(token);
+        },
+        'error-callback': () => {
+          // Graceful degradation — proceed without token
+          removeTurnstileContainer(container);
+          resolve(null);
+        },
+        'expired-callback': () => {
+          // Token expired — clean up old container, re-challenge silently.
+          // Update module-level promise so future getTurnstileToken() callers
+          // await the new challenge instead of getting the stale resolved one.
+          removeTurnstileContainer(container);
+          tokenPromise = runChallenge(siteKey);
+        },
+        size: 'invisible',
+      });
+    } catch {
+      // window.turnstile unavailable or render threw — proceed without token
+      removeTurnstileContainer(container);
+      resolve(null);
+      return;
+    }
 
     // Timeout: if challenge doesn't resolve in 10s, proceed without it
     setTimeout(() => {
@@ -134,21 +144,23 @@ export function initTurnstile(): void {
 
   initialized = true;
 
-  // Set up a promise that resolves when the first challenge completes (or times out).
-  // This covers both the script-loading phase and the challenge phase.
+  // This promise covers the entire init: script loading + first challenge.
+  // getTurnstileToken() awaits this until the first token is available.
+  // Two separate timeouts handle two separate failure modes:
+  //   1. Script-loading timeout (below) — CDN blocked or slow
+  //   2. Challenge timeout (inside runChallenge) — widget hangs
+  // The script timeout is cleared once the script loads, so the two
+  // timeouts never race against each other.
   tokenPromise = new Promise<string | null>((resolve) => {
-    window.__onTurnstileLoad = () => {
-      // Script loaded — run the first challenge
-      runChallenge(siteKey);
-      // Forward the first challenge result
-      // runChallenge() just set tokenPromise to the challenge promise, so
-      // we chain on it. This is intentionally not awaited — the resolution
-      // flows through the .then() callback.
-      void tokenPromise!.then(resolve);
-    };
+    const scriptTimeout = setTimeout(() => resolve(null), 10_000);
 
-    // Timeout: if the Turnstile script doesn't load in 10s, proceed without it
-    setTimeout(() => resolve(null), 10_000);
+    window.__onTurnstileLoad = () => {
+      clearTimeout(scriptTimeout);
+      // Script loaded — run first challenge. Its own timeout handles slow challenges.
+      // The catch ensures a rejected challenge (e.g., render throws) still
+      // resolves the outer promise with null instead of leaving it pending.
+      void runChallenge(siteKey).then(resolve, () => resolve(null));
+    };
   });
 
   // Load the Turnstile script from CDN (once)
@@ -161,9 +173,22 @@ export function initTurnstile(): void {
 /**
  * Get the Turnstile token (awaits if the challenge is still in progress).
  * Returns `null` if Turnstile is not configured, failed, or timed out.
+ *
+ * Includes a hard 15s timeout as a last-resort safety net — even if internal
+ * timeouts (setTimeout) are throttled (background tabs) or manipulated, this
+ * prevents callers from hanging indefinitely.
  */
 export async function getTurnstileToken(): Promise<string | null> {
   if (turnstileToken) return turnstileToken;
-  if (tokenPromise) return tokenPromise;
-  return null; // Turnstile not initialized
+  if (!tokenPromise) return null; // Turnstile not initialized
+
+  // Race the token promise against an absolute timeout. This catches
+  // scenarios where internal setTimeout calls are frozen (browser throttling
+  // background tabs) or never fire. The 15s budget covers script load (10s)
+  // + challenge (10s) with overlap.
+  const HARD_TIMEOUT_MS = 15_000;
+  return Promise.race([
+    tokenPromise,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), HARD_TIMEOUT_MS)),
+  ]);
 }

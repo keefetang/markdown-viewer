@@ -2,10 +2,10 @@
   /**
    * Application toolbar — all action groups, responsive layout.
    *
-   * Desktop (>=768px): full row with logical groups:
+   * Desktop (>767px): full row with logical groups:
    *   [App Title | New] [Editor|Split|Preview] [Import|Export▾|Copy] [Share▾|Fork|Delete] [Sync] [Save State | Stats]
    *
-   * Mobile (<768px): compact bar:
+   * Mobile (≤767px): compact bar:
    *   [Editor|Split|Preview] [Share] [Save State] [...]
    *   Overflow menu: Import, Export, Copy, Fork, Delete, Sync, Stats
    *

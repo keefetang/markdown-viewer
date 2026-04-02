@@ -81,7 +81,7 @@ npx tsc --noEmit     # Worker-only check (faster, skips .svelte files)
 #   stats.ts, tokens.ts, shortcuts.ts, export.ts (extractTitle, computeStats, etc.)
 ```
 
-Build must produce: initial JS < 175kb gzipped (currently ~79kb). KaTeX lazy chunk (~800kb) is expected and excluded from the budget via `chunkSizeWarningLimit: 900` in vite.config.ts.
+Build must produce: initial JS < 175kb gzipped. Verify with `npm run build`. KaTeX lazy chunk (~800kb) is expected and excluded from the budget via `chunkSizeWarningLimit: 900` in vite.config.ts.
 
 ## Code Style
 
@@ -173,7 +173,7 @@ Sources: OWASP SSRF Prevention Cheat Sheet, PortSwigger URL validation bypass re
 
 ## Performance Constraints
 
-- **Initial bundle target: < 175kb gzipped** (currently ~88kb: 79kb JS + 9kb CSS)
+- **Initial bundle target: < 175kb gzipped** (verify with `npm run build` — JS + CSS combined)
 - **KaTeX is lazy-loaded** — NOT in the initial bundle. Two markdown-it instances: `md` (base, always available) and `mdWithKatex` (created on demand after `await import('katex')`)
 - **highlight.js** — only 10 core languages registered (js, ts, python, bash, json, html, css, go, rust, sql). Rest lazy-loaded.
 - Vite chunk size warning limit set to 900kb (KaTeX lazy chunk is ~800kb, intentional)

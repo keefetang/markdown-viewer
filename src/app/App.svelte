@@ -34,7 +34,7 @@
 
   const VIEW_MODE_KEY = 'markdown-viewer-view-mode';
   const THEME_KEY = 'markdown-viewer-theme';
-  const NARROW_BREAKPOINT = 768;
+  const NARROW_MQ = '(max-width: 767px)';
   const SESSION_ID_RE = /^[A-Za-z0-9_-]{12}$/;
   const DELETE_UNDO_MS = 10_000;
   const FILE_ACCEPT = '.md,.markdown,.txt,.text';
@@ -215,9 +215,11 @@
       applyReadOnlyViewMode();
     }
 
-    // Track window width for responsive behavior
-    function checkWidth(): void {
-      const narrow = window.innerWidth < NARROW_BREAKPOINT;
+    // Track viewport width via matchMedia — fires only on breakpoint
+    // crossing, not on every pixel of resize. Also catches non-resize
+    // viewport changes (e.g., virtual keyboard on mobile).
+    const mq = window.matchMedia(NARROW_MQ);
+    function onBreakpoint(narrow: boolean): void {
       if (narrow !== isNarrow) {
         isNarrow = narrow;
         if (narrow && viewMode === 'split') {
@@ -225,8 +227,9 @@
         }
       }
     }
-    checkWidth();
-    window.addEventListener('resize', checkWidth);
+    onBreakpoint(mq.matches);
+    const mqHandler = (e: MediaQueryListEvent) => onBreakpoint(e.matches);
+    mq.addEventListener('change', mqHandler);
 
     // --- Auto-save ---
     if (isReadOnly) {
@@ -267,7 +270,7 @@
     });
 
     return () => {
-      window.removeEventListener('resize', checkWidth);
+      mq.removeEventListener('change', mqHandler);
       cleanupShortcuts();
       autosave?.destroy();
       if (scrollTimeout) clearTimeout(scrollTimeout);
@@ -318,8 +321,7 @@
   // ─── Read-only view mode ──────────────────────────────────────────────────
 
   function applyReadOnlyViewMode(): void {
-    const narrow = window.innerWidth < NARROW_BREAKPOINT;
-    viewMode = narrow ? 'preview' : 'split';
+    viewMode = window.matchMedia(NARROW_MQ).matches ? 'preview' : 'split';
   }
 
   // ─── View mode ─────────────────────────────────────────────────────────────
@@ -752,7 +754,7 @@
   .app-shell {
     display: flex;
     flex-direction: column;
-    height: 100vh;
+    height: 100dvh;
     overflow: hidden;
     position: relative;
   }

@@ -161,6 +161,9 @@
         // Theme
         editorTheme,
 
+        // Accessible name for the contenteditable textbox (WCAG aria-input-field-name)
+        EditorView.contentAttributes.of({ 'aria-label': 'Markdown editor' }),
+
         // Content change listener — stateless loop prevention via lastSyncedContent
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {

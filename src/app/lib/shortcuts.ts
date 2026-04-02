@@ -10,9 +10,9 @@
 import type { ViewMode } from './types';
 
 export interface ShortcutHandlers {
-  /** Cmd/Ctrl+S — force save (placeholder: prevents browser save dialog) */
+  /** Cmd/Ctrl+S — force save (flush auto-save) */
   onSave: () => void;
-  /** Cmd/Ctrl+Shift+C — copy rendered content (placeholder: console log) */
+  /** Cmd/Ctrl+Shift+C — copy rendered content to clipboard */
   onCopyRendered: () => void;
   /** Cmd/Ctrl+\ — cycle view mode */
   onCycleViewMode: () => void;
