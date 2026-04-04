@@ -4,7 +4,7 @@ A markdown pad that's fast, private, and yours to deploy. No accounts, no cookie
 
 **[Try the live demo →](https://markdown.pentagram.me)**
 
-<!-- TODO: Add screenshot showing split view with editor and rendered preview -->
+https://github.com/user-attachments/assets/7aa83d98-46a8-4f12-ac18-d429efeee945
 
 > **Private by default.** No cookies. No user accounts. No personal data collected or stored. Sessions contain only your markdown content and timestamps. Nothing else.
 
