@@ -1,7 +1,9 @@
 import { handleApi, handleCorsPreflight, handleImportUrl } from './api';
 import { getIndexHtml, getIndexMarkdown } from './index-content';
+import { handleMcp } from './mcp';
 import { applySecurityHeaders, NonceInjector } from './security';
-import { escapeForHtml, timingSafeEqual } from './shared';
+import { extractRawFrontmatter } from '../shared/frontmatter';
+import { escapeForHtml, timingSafeEqual, sessionHeaders, computeContentHash, checkIfNoneMatch, sliceContent } from './shared';
 import type { SessionMetadata } from './shared';
 import { handleSession } from './ssr';
 import { renderMarkdown, extractTitle } from '../shared/markdown';
@@ -23,6 +25,36 @@ interface Env {
 
 const SESSION_ID_RE = /^\/[A-Za-z0-9_-]{12}$/;
 
+// ---- MCP Server Card (EXPERIMENTAL) ----
+// Based on draft SEP-2127 (MCP Server Cards). This standard is not yet
+// finalized. Revisit when SEP-2127 is adopted or superseded.
+
+/** Build the MCP server card dynamically from the request origin. */
+function buildMcpServerCard(origin: string): string {
+  return JSON.stringify({
+    $schema: 'https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json',
+    name: 'markdown-viewer',
+    version: '1.0.0',
+    title: 'Markdown Viewer',
+    description:
+      'Privacy-first markdown document platform. Create, read, update, and share markdown documents via unique URLs. Supports YAML frontmatter conventions, partial read/write, batch operations, and edit history.',
+    websiteUrl: origin,
+    remotes: [
+      {
+        type: 'streamable-http',
+        url: `${origin}/mcp`,
+        supportedProtocolVersions: ['2025-03-26'],
+        authentication: {
+          required: false,
+        },
+      },
+    ],
+    capabilities: {
+      tools: {},
+    },
+  }, null, 2);
+}
+
 // ---- Content Negotiation ----
 
 function wantsMarkdown(request: Request): boolean {
@@ -38,6 +70,45 @@ function wantsMarkdown(request: Request): boolean {
  * via the UI. Private sessions require a valid edit token. Never exposes editToken.
  */
 async function handleMarkdownContent(request: Request, env: Env, sessionId: string): Promise<Response> {
+  const url = new URL(request.url);
+
+  // --- Validate offset/limit/fields query params ---
+  const offsetStr = url.searchParams.get('offset');
+  const limitStr = url.searchParams.get('limit');
+  const fields = url.searchParams.get('fields');
+
+  let offset: number | undefined;
+  let limit: number | undefined;
+
+  if (offsetStr !== null) {
+    const n = Number(offsetStr);
+    if (!Number.isInteger(n) || n < 1) {
+      return new Response('offset must be a positive integer', {
+        status: 400,
+        headers: { 'Content-Type': 'text/plain' },
+      });
+    }
+    offset = n;
+  }
+
+  if (limitStr !== null) {
+    const n = Number(limitStr);
+    if (!Number.isInteger(n) || n < 1) {
+      return new Response('limit must be a positive integer', {
+        status: 400,
+        headers: { 'Content-Type': 'text/plain' },
+      });
+    }
+    limit = n;
+  }
+
+  if (fields !== null && fields !== 'frontmatter') {
+    return new Response('fields must be "frontmatter"', {
+      status: 400,
+      headers: { 'Content-Type': 'text/plain' },
+    });
+  }
+
   const { value: content, metadata } =
     await env.SESSIONS.getWithMetadata<SessionMetadata>(sessionId);
 
@@ -60,9 +131,37 @@ async function handleMarkdownContent(request: Request, env: Env, sessionId: stri
     }
   }
 
+  // Conditional retrieval — 304 when client already has current version.
+  if (checkIfNoneMatch(request, metadata.updatedAt)) {
+    return new Response(null, {
+      status: 304,
+      headers: sessionHeaders(metadata),
+    });
+  }
+
+  // Backward compat: compute hash on-the-fly for old documents without contentHash.
+  const contentHash = metadata.contentHash ?? await computeContentHash(content);
+
+  // --- fields=frontmatter: return raw YAML frontmatter block as text ---
+  if (fields === 'frontmatter') {
+    const rawBlock = extractRawFrontmatter(content);
+    return new Response(rawBlock ?? '', {
+      headers: {
+        'Content-Type': 'text/markdown; charset=utf-8',
+        ...sessionHeaders(metadata, contentHash),
+      },
+    });
+  }
+
+  // --- Line-range slicing for text/markdown responses ---
+  const { sliced: responseContent } = sliceContent(content, offset, limit);
+
   // X-Robots-Tag and Cache-Control added by applySecurityHeaders (isApi=true)
-  return new Response(content, {
-    headers: { 'Content-Type': 'text/markdown; charset=utf-8' },
+  return new Response(responseContent, {
+    headers: {
+      'Content-Type': 'text/markdown; charset=utf-8',
+      ...sessionHeaders(metadata, contentHash),
+    },
   });
 }
 
@@ -92,6 +191,17 @@ async function handleHtmlContent(request: Request, env: Env, sessionId: string):
     }
   }
 
+  // Conditional retrieval — 304 when client already has current version.
+  if (checkIfNoneMatch(request, metadata.updatedAt)) {
+    return new Response(null, {
+      status: 304,
+      headers: sessionHeaders(metadata),
+    });
+  }
+
+  // Backward compat: compute hash on-the-fly for old documents without contentHash.
+  const contentHash = metadata.contentHash ?? await computeContentHash(content);
+
   const rendered = renderMarkdown(content);
   const title = extractTitle(content) || 'Untitled';
   const html = buildHtmlDocument(rendered, title);
@@ -100,6 +210,7 @@ async function handleHtmlContent(request: Request, env: Env, sessionId: string):
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'X-Robots-Tag': 'noindex',
+      ...sessionHeaders(metadata, contentHash),
     },
   });
 }
@@ -107,11 +218,51 @@ async function handleHtmlContent(request: Request, env: Env, sessionId: string):
 // ---- Router ----
 
 export default {
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const { pathname } = url;
 
     try {
+      // EXPERIMENTAL: MCP Server Card (draft SEP-2127).
+      // Dynamic: derives URLs from request origin so it works on any deployment.
+      if (pathname === '/.well-known/mcp-server-card') {
+        const res = applySecurityHeaders(
+          new Response(buildMcpServerCard(url.origin), {
+            headers: {
+              'Content-Type': 'application/json',
+              'Access-Control-Allow-Origin': '*',
+            },
+          }),
+          true,
+        );
+        // Override api-default headers: this is a static discovery endpoint,
+        // not a dynamic API — it should be cacheable and indexable.
+        res.headers.set('Cache-Control', 'public, max-age=86400');
+        res.headers.delete('X-Robots-Tag');
+        return res;
+      }
+
+      // MCP server — Streamable HTTP transport for AI agent tool access.
+      // Match exact path or path with trailing segments (e.g. /mcp/sse).
+      // Rate limit POST requests (tool calls) using the write limiter.
+      if (pathname === '/mcp' || pathname.startsWith('/mcp/')) {
+        if (request.method === 'POST' && env.WRITE_LIMITER) {
+          const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+          const { success } = await env.WRITE_LIMITER.limit({ key: ip });
+          if (!success) {
+            return applySecurityHeaders(
+              new Response(JSON.stringify({ error: 'Rate limit exceeded' }), {
+                status: 429,
+                headers: { 'Content-Type': 'application/json', 'Retry-After': '60' },
+              }),
+              true,
+            );
+          }
+        }
+        const mcpResponse = await handleMcp(request, env, ctx);
+        return applySecurityHeaders(mcpResponse, true);
+      }
+
       // API routes — handle CORS preflight at the router level
       if (pathname.startsWith('/api/')) {
         if (request.method === 'OPTIONS') {
@@ -124,7 +275,7 @@ export default {
           return applySecurityHeaders(importResponse, true);
         }
 
-        const apiResponse = await handleApi(request, env);
+        const apiResponse = await handleApi(request, env, ctx);
         return applySecurityHeaders(apiResponse, true);
       }
 
@@ -228,18 +379,19 @@ async function handleAssets(request: Request, env: Env, url: URL, nonce: string)
     rewriter = rewriter
       .on('head', {
         element(el) {
-          el.append([
+          const tags = [
             `<meta property="og:title" content="Markdown Viewer" />`,
             `<meta property="og:description" content="A fast, privacy-first markdown pad. Write, preview, and share markdown via unique URLs." />`,
             `<meta property="og:type" content="website" />`,
             `<meta property="og:url" content="${indexUrl}" />`,
             `<meta name="twitter:card" content="summary" />`,
-          ].join('\n'), { html: true });
+          ].join('\n    ');
+          el.append(`\n    ${tags}`, { html: true });
         },
       })
       .on('div#content', {
         element(el) {
-          el.setInnerContent(getIndexHtml(), { html: true });
+          el.setInnerContent(`\n      ${getIndexHtml().replace(/\n/g, '\n      ')}\n    `, { html: true });
         },
       });
   }
@@ -249,7 +401,7 @@ async function handleAssets(request: Request, env: Env, url: URL, nonce: string)
     rewriter = rewriter.on('body', {
       element(el) {
         el.append(
-          `<script nonce="${nonce}" defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token":"${token}"}'></script>`,
+          `\n    <script nonce="${nonce}" defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token":"${token}"}'></script>\n  `,
           { html: true },
         );
       },
@@ -261,7 +413,7 @@ async function handleAssets(request: Request, env: Env, url: URL, nonce: string)
     rewriter = rewriter.on('head', {
       element(el) {
         el.append(
-          `<script nonce="${nonce}">window.__TURNSTILE_KEY__="${siteKey}";</script>`,
+          `\n    <script nonce="${nonce}">window.__TURNSTILE_KEY__="${siteKey}";</script>\n  `,
           { html: true },
         );
       },

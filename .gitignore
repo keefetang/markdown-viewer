@@ -24,3 +24,7 @@ Thumbs.db
 
 # TypeScript build cache
 *.tsbuildinfo
+
+# Analysis documents (from planning sessions, not part of the codebase)
+ANALYSIS-*.md
+PRODUCT-THESIS.md

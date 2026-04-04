@@ -25,7 +25,7 @@
   import { createAutosave } from './lib/autosave';
   import { initTurnstile, getTurnstileToken, isTurnstileConfigured } from './lib/turnstile';
   import { downloadMarkdown, downloadHtml, printToPdf, copyRendered } from './lib/export';
-  import { extractTitle } from '../shared/markdown';
+  import { extractTitle, slugify } from '../shared/markdown';
   import { PLACEHOLDER_MARKDOWN } from './lib/placeholder';
   import type { AutosaveHandle } from './lib/autosave';
   import { MAX_CONTENT_SIZE } from './lib/types';
@@ -81,13 +81,6 @@
 
   let editorRef = $state<Editor | undefined>();
   let previewRef = $state<Preview | undefined>();
-
-  // Scroll sync feedback-loop prevention: when editor scrolls → set source='editor'
-  // → preview ignores its own scroll event → 50ms timeout clears the flag.
-  // Without this, setting scrollTop on one pane triggers its scroll event,
-  // which sets scrollTop on the other, creating infinite ping-pong.
-  let scrollSource: 'editor' | 'preview' | null = null;
-  let scrollTimeout: ReturnType<typeof setTimeout> | undefined;
 
   // ─── Derived ───────────────────────────────────────────────────────────────
 
@@ -291,11 +284,24 @@
       },
     });
 
+    // --- Hash fragment scroll (deferred) ---
+    // Wait for both panes to fully render before scrolling to a heading.
+    // CodeMirror needs time after content is set to complete internal
+    // requestMeasure cycles. 300ms is enough for first-paint layout.
+    const hash = window.location.hash.slice(1);
+    let hashScrollTimer: ReturnType<typeof setTimeout> | undefined;
+    if (hash && !hash.startsWith('token=')) {
+      hashScrollTimer = setTimeout(() => {
+        scrollToHash(hash);
+      }, 300);
+    }
+
     return () => {
       mq.removeEventListener('change', mqHandler);
       cleanupShortcuts();
       autosave?.destroy();
-      if (scrollTimeout) clearTimeout(scrollTimeout);
+      if (anchorAnimationId !== undefined) cancelAnimationFrame(anchorAnimationId);
+      if (hashScrollTimer) clearTimeout(hashScrollTimer);
       clearTimeout(toastTimer);
       clearTimeout(deleteUndoTimer);
     };
@@ -405,27 +411,245 @@
   }
 
   // ─── Sync scrolling ───────────────────────────────────────────────────────
+  //
+  // Pointer-based direction detection (VS Code approach):
+  // Only sync FROM the pane the user's pointer is over TO the other pane.
+  // Scroll events from the passive pane are completely ignored — no feedback loop.
 
-  function handleEditorScroll(ratio: number): void {
-    if (!syncScroll || viewMode !== 'split') return;
-    if (scrollSource === 'preview') return;
+  /** Which pane the user's pointer is currently over. */
+  let activePane: 'editor' | 'preview' | null = null;
 
-    scrollSource = 'editor';
-    previewRef?.setScrollRatio(ratio);
+  /** When true, ALL scroll sync is suppressed (anchor navigation in progress). */
+  let anchorNavigating = false;
+  /** Active animation frame ID — allows cancellation if a new anchor is clicked mid-animation. */
+  let anchorAnimationId: number | undefined;
 
-    clearTimeout(scrollTimeout);
-    scrollTimeout = setTimeout(() => { scrollSource = null; }, 50);
+  function handleEditorScroll(line: number): void {
+    if (!syncScroll || viewMode !== 'split' || anchorNavigating) return;
+    if (activePane !== 'editor') return; // Only sync when user is scrolling THIS pane
+
+    previewRef?.scrollToSourceLine(line);
   }
 
-  function handlePreviewScroll(ratio: number): void {
-    if (!syncScroll || viewMode !== 'split') return;
-    if (scrollSource === 'editor') return;
+  function handlePreviewScroll(line: number): void {
+    if (!syncScroll || viewMode !== 'split' || anchorNavigating) return;
+    if (activePane !== 'preview') return; // Only sync when user is scrolling THIS pane
 
-    scrollSource = 'preview';
-    editorRef?.setScrollRatio(ratio);
+    editorRef?.scrollToSourceLine(line);
+  }
 
-    clearTimeout(scrollTimeout);
-    scrollTimeout = setTimeout(() => { scrollSource = null; }, 50);
+  // ─── Hash scroll on page load ──────────────────────────────────────────────
+
+  /**
+   * Scroll to a heading by slug on initial page load.
+   *
+   * CodeMirror virtualizes rendering — lines not in the viewport aren't
+   * rendered, so lineBlockAt() returns estimated positions based on average
+   * line height. For headings deep in a long document with word-wrapped lines,
+   * the estimate can be off by several lines.
+   *
+   * Fix: two-pass approach.
+   * Pass 1: scroll the editor instantly to the estimated position. This forces
+   *         CM6 to render the lines around the target.
+   * Pass 2: after a frame, recalculate from the now-rendered DOM and set both
+   *         panes to their final positions. No animation on page load — the
+   *         user just wants to land at the section, not watch a scroll.
+   */
+  function scrollToHash(slug: string): void {
+    const previewContainer = previewRef?.getScrollContainer();
+    if (!previewContainer) return;
+
+    const target = previewContainer.querySelector(`#${CSS.escape(slug)}`);
+    if (!target) return;
+
+    // Find the editor line for this slug
+    const editorScrollDOM = (viewMode === 'split' && editorRef) ? editorRef.getScrollDOM() : null;
+    let editorLine: number | null = null;
+
+    if (editorScrollDOM && editorRef) {
+      const slugCounts: Record<string, number> = {};
+      const lines = markdown.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const match = lines[i].match(/^#{1,6}\s+(.+)/);
+        if (!match) continue;
+        const baseSlug = slugify(match[1].trim()) || 'heading';
+        const count = slugCounts[baseSlug] ?? 0;
+        slugCounts[baseSlug] = count + 1;
+        const lineSlug = count === 0 ? baseSlug : `${baseSlug}-${count}`;
+        if (lineSlug === slug) {
+          editorLine = i + 1;
+          break;
+        }
+      }
+    }
+
+    // Suppress scroll sync during the anchor scroll
+    anchorNavigating = true;
+
+    // Pass 1: scroll editor to estimated position (forces CM6 to render
+    // lines around the target, defeating virtualization).
+    // Preview: use browser's scrollIntoView — handles padding/margins correctly.
+    if (editorScrollDOM && editorRef && editorLine !== null) {
+      const estimatedTop = editorRef.getLineScrollTop(editorLine);
+      if (estimatedTop !== null) {
+        editorScrollDOM.scrollTop = estimatedTop;
+      }
+    }
+    (target as HTMLElement).scrollIntoView({ block: 'start', behavior: 'instant' });
+
+    // Pass 2: after CM6 renders the now-visible lines, recalculate editor
+    // from actual rendered DOM. Preview is already correct (scrollIntoView).
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (editorScrollDOM && editorRef && editorLine !== null) {
+        const exactTop = editorRef.getLineScrollTop(editorLine);
+        if (exactTop !== null) {
+          editorScrollDOM.scrollTop = exactTop;
+        }
+      }
+
+      // Don't clear anchorNavigating immediately — the scroll events from
+      // the adjustments above fire AFTER this callback returns. If we clear
+      // the flag now, handleEditorScroll will see anchorNavigating=false and
+      // override the preview with line-based sync. Wait for scroll events
+      // to settle.
+      setTimeout(() => { anchorNavigating = false; }, 100);
+    }));
+
+    // Update URL hash
+    history.replaceState(null, '', `${window.location.pathname}${window.location.search}#${slug}`);
+  }
+
+  // ─── Coordinated anchor scroll animation ─────────────────────────────────
+
+  const SCROLL_DURATION = 400; // ms
+  const SCROLL_EASING = (t: number): number => 1 - Math.pow(1 - t, 3); // easeOutCubic
+
+  /**
+   * Animate two scroll containers simultaneously to their respective targets.
+   * Same duration, same easing — perfectly synchronized.
+   */
+  function animateScrollBoth(
+    containerA: HTMLElement, targetA: number,
+    containerB: HTMLElement, targetB: number,
+  ): void {
+    const startA = containerA.scrollTop;
+    const startB = containerB.scrollTop;
+    const startTime = performance.now();
+
+    // Cancel any in-flight animation (e.g. rapid anchor clicks)
+    if (anchorAnimationId !== undefined) {
+      cancelAnimationFrame(anchorAnimationId);
+    }
+
+    // Suppress line-based sync during animation
+    anchorNavigating = true;
+
+    function tick(now: number): void {
+      const elapsed = now - startTime;
+      const progress = Math.min(elapsed / SCROLL_DURATION, 1);
+      const eased = SCROLL_EASING(progress);
+
+      containerA.scrollTop = startA + (targetA - startA) * eased;
+      containerB.scrollTop = startB + (targetB - startB) * eased;
+
+      if (progress < 1) {
+        anchorAnimationId = requestAnimationFrame(tick);
+      } else {
+        // Re-enable scroll sync after animation completes
+        anchorAnimationId = undefined;
+        anchorNavigating = false;
+      }
+    }
+
+    anchorAnimationId = requestAnimationFrame(tick);
+  }
+
+  /**
+   * Handle anchor-based navigation from the preview pane.
+   * Receives the heading slug and the preview's target scroll position.
+   * Finds the matching heading line in markdown source, then animates
+   * both panes simultaneously with the same easing curve.
+   */
+  function handleAnchorNavigate(slug: string, previewTargetScrollTop: number): void {
+    // Defer to after both panes have completed layout.
+    // On page load, the preview $effect fires before CodeMirror finishes its
+    // first paint — getLineScrollTop() returns inaccurate values. Double-rAF
+    // ensures both panes are fully laid out before computing scroll targets.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      doAnchorNavigate(slug, previewTargetScrollTop);
+    }));
+  }
+
+  function doAnchorNavigate(slug: string, previewTargetScrollTop: number): void {
+    if (!previewRef) return;
+
+    const previewContainer = previewRef.getScrollContainer();
+    if (!previewContainer) return;
+
+    // Recompute preview target — layout may have shifted since the caller measured
+    const previewTarget = previewContainer.querySelector(`#${CSS.escape(slug)}`);
+    const finalPreviewTarget = previewTarget
+      ? previewTarget.getBoundingClientRect().top - previewContainer.getBoundingClientRect().top + previewContainer.scrollTop
+      : previewTargetScrollTop;
+
+    const editorScrollDOM = (viewMode === 'split' && editorRef) ? editorRef.getScrollDOM() : null;
+
+    // Replicate the slug generation logic from markdown.ts heading renderer:
+    // track slug counts to match duplicate headings (e.g., slug-1, slug-2)
+    let editorTargetScrollTop: number | null = null;
+    if (editorScrollDOM && editorRef) {
+      const slugCounts: Record<string, number> = {};
+      const lines = markdown.split('\n');
+
+      for (let i = 0; i < lines.length; i++) {
+        const match = lines[i].match(/^#{1,6}\s+(.+)/);
+        if (!match) continue;
+
+        const baseSlug = slugify(match[1].trim()) || 'heading';
+        const count = slugCounts[baseSlug] ?? 0;
+        slugCounts[baseSlug] = count + 1;
+        const lineSlug = count === 0 ? baseSlug : `${baseSlug}-${count}`;
+
+        if (lineSlug === slug) {
+          editorTargetScrollTop = editorRef.getLineScrollTop(i + 1); // 1-indexed
+          break;
+        }
+      }
+    }
+
+    if (editorScrollDOM && editorTargetScrollTop !== null) {
+      // Animate both panes simultaneously
+      animateScrollBoth(previewContainer, finalPreviewTarget, editorScrollDOM, editorTargetScrollTop);
+    } else {
+      // Editor target not found or not in split mode — scroll preview only.
+      // Bind to const so TypeScript knows it's non-null inside the closure.
+      const container = previewContainer;
+      anchorNavigating = true;
+      if (anchorAnimationId !== undefined) cancelAnimationFrame(anchorAnimationId);
+
+      const startTop = container.scrollTop;
+      const startTime = performance.now();
+
+      function tick(now: number): void {
+        const elapsed = now - startTime;
+        const progress = Math.min(elapsed / SCROLL_DURATION, 1);
+        const eased = SCROLL_EASING(progress);
+
+        container.scrollTop = startTop + (finalPreviewTarget - startTop) * eased;
+
+        if (progress < 1) {
+          anchorAnimationId = requestAnimationFrame(tick);
+        } else {
+          anchorAnimationId = undefined;
+          anchorNavigating = false;
+        }
+      }
+
+      anchorAnimationId = requestAnimationFrame(tick);
+    }
+
+    // Update URL hash
+    history.replaceState(null, '', `${window.location.pathname}${window.location.search}#${slug}`);
   }
 
   // ─── Private toggle ────────────────────────────────────────────────────────
@@ -753,23 +977,37 @@
 
   <main class="workspace">
     {#if viewMode === 'split'}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <SplitPane>
         {#snippet left()}
-          <Editor
-            bind:this={editorRef}
-            content={markdown}
-            readonly={isReadOnly}
-            {lineWrap}
-            onchange={handleContentChange}
-            onscroll={handleEditorScroll}
-          />
+          <div
+            class="pane-sync-wrapper"
+            onpointerenter={() => { activePane = 'editor'; }}
+            onpointerleave={() => { if (activePane === 'editor') activePane = null; }}
+          >
+            <Editor
+              bind:this={editorRef}
+              content={markdown}
+              readonly={isReadOnly}
+              {lineWrap}
+              onchange={handleContentChange}
+              onscroll={handleEditorScroll}
+            />
+          </div>
         {/snippet}
         {#snippet right()}
-          <Preview
-            bind:this={previewRef}
-            content={markdown}
-            onscroll={handlePreviewScroll}
-          />
+          <div
+            class="pane-sync-wrapper"
+            onpointerenter={() => { activePane = 'preview'; }}
+            onpointerleave={() => { if (activePane === 'preview') activePane = null; }}
+          >
+            <Preview
+              bind:this={previewRef}
+              content={markdown}
+              onscroll={handlePreviewScroll}
+              onanchornavigate={handleAnchorNavigate}
+            />
+          </div>
         {/snippet}
       </SplitPane>
     {:else if viewMode === 'editor'}
@@ -826,6 +1064,11 @@
     flex: 1;
     overflow: hidden;
     min-height: 0;
+  }
+
+  :global(.pane-sync-wrapper) {
+    width: 100%;
+    height: 100%;
   }
 
   /* ── Toast ── */
