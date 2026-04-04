@@ -130,6 +130,10 @@ h6 {
   --margin-hover: #325c78;
   --margin-active: #284b63;
 
+  /* --- Selection --- solid opaque for subpixel antialiasing */
+  --selection: #c0d4e8;
+  --selection-inactive: #d8e2ec;
+
   /* --- Semantic ---
      mark-error:    red pencil — errors, destructive actions
      mark-warning:  amber — caution, unsaved state
@@ -267,6 +271,10 @@ h6 {
     --margin-hover: #82b5d6;
     --margin-active: #5690b4;
 
+    /* Selection — solid blue, brighter than VS Code for better visibility */
+    --selection: #2e5578;
+    --selection-inactive: #263545;
+
     /* Semantic — slightly desaturated for dark mode */
     --mark-error: #d4706a;
     --mark-warning: #cca050;
@@ -302,6 +310,9 @@ h6 {
   --margin-note: #6ba3c7;
   --margin-hover: #82b5d6;
   --margin-active: #5690b4;
+
+  --selection: #2e5578;
+  --selection-inactive: #263545;
 
   --mark-error: #d4706a;
   --mark-warning: #cca050;

@@ -22,7 +22,7 @@
     readonly?: boolean;
     lineWrap?: boolean;
     onchange?: (content: string) => void;
-    onscroll?: (ratio: number) => void;
+    onscroll?: (line: number) => void;
   }
 
   let {
@@ -188,17 +188,12 @@
       parent: containerEl,
     });
 
-    // Scroll listener for sync scrolling
+    // Scroll listener for sync scrolling — reports the 0-indexed source line
+    // at the top of the visible viewport, with sub-line fractional precision.
     const scroller = view.scrollDOM;
     const handleScroll = () => {
-      if (!onscroll) return;
-      const { scrollTop, scrollHeight, clientHeight } = scroller;
-      const maxScroll = scrollHeight - clientHeight;
-      if (maxScroll <= 0) {
-        onscroll(0);
-        return;
-      }
-      onscroll(scrollTop / maxScroll);
+      if (!onscroll || !view) return;
+      onscroll(getTopVisibleLine());
     };
     scroller.addEventListener('scroll', handleScroll, { passive: true });
 
@@ -244,15 +239,59 @@
     }
   });
 
+  // ─── Scroll helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Get the 0-indexed source line at the top of the CodeMirror viewport.
+   * Returns a fractional value for sub-line precision.
+   */
+  function getTopVisibleLine(): number {
+    if (!view) return 0;
+
+    const scrollTop = view.scrollDOM.scrollTop;
+    const block = view.lineBlockAtHeight(scrollTop);
+    const topLine = view.state.doc.lineAt(block.from);
+
+    // Fractional: how far through this visual line block are we?
+    const fraction = block.bottom > block.top
+      ? (scrollTop - block.top) / (block.bottom - block.top)
+      : 0;
+
+    // Convert to 0-indexed to match data-line attributes
+    return topLine.number - 1 + Math.max(0, Math.min(1, fraction));
+  }
+
   // ─── Public API ───────────────────────────────────────────────────────────
 
-  /** Set the scroll position by ratio (0-1). Called by parent for sync scrolling. */
-  export function setScrollRatio(ratio: number): void {
+  /** Scroll the editor to a source line (0-indexed, fractional). */
+  export function scrollToSourceLine(line: number): void {
     if (!view) return;
-    const { scrollHeight, clientHeight } = view.scrollDOM;
-    const maxScroll = scrollHeight - clientHeight;
-    if (maxScroll <= 0) return;
-    view.scrollDOM.scrollTop = ratio * maxScroll;
+    const doc = view.state.doc;
+    const lineNum = Math.floor(line) + 1; // Convert 0-indexed to 1-indexed
+    if (lineNum < 1 || lineNum > doc.lines) return;
+
+    const pos = doc.line(lineNum).from;
+    const block = view.lineBlockAt(pos);
+
+    // Fractional offset within the line
+    const fraction = line - Math.floor(line);
+    const targetTop = block.top + fraction * (block.bottom - block.top);
+
+    view.scrollDOM.scrollTop = targetTop;
+  }
+
+  /** Get the target scroll position for a 1-indexed line number. */
+  export function getLineScrollTop(line: number): number | null {
+    if (!view) return null;
+    const doc = view.state.doc;
+    if (line < 1 || line > doc.lines) return null;
+    const pos = doc.line(line).from;
+    return view.lineBlockAt(pos).top;
+  }
+
+  /** Get the scroll DOM element for external animation control. */
+  export function getScrollDOM(): HTMLElement | null {
+    return view?.scrollDOM ?? null;
   }
 </script>
 

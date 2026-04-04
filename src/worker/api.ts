@@ -1,6 +1,20 @@
-import { nanoid } from 'nanoid';
-import { timingSafeEqual } from './shared';
-import type { SessionMetadata } from './shared';
+import {
+  getSession,
+  putSession,
+  patchSession,
+  deleteSession,
+  getHistory,
+  getBacklinks,
+  importUrl,
+  SESSION_ID_RE,
+  MAX_CONTENT_LENGTH,
+} from './sessions';
+import { normalizeETag, sliceContent } from './shared';
+import type {
+  PatchOperation,
+  GetSessionSuccess,
+  GetSessionResult,
+} from './sessions';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -18,24 +32,21 @@ interface Env {
 }
 
 // ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const SESSION_ID_RE = /^[A-Za-z0-9_-]{12}$/;
-const MAX_CONTENT_LENGTH = 524_288; // 512 KB
-const EXPIRATION_TTL = 7_776_000;       // 90 days — browser-created sessions
-const AGENT_EXPIRATION_TTL = 2_592_000; // 30 days — agent/script-created sessions (no Turnstile)
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function jsonResponse(body: unknown, status: number, corsHeaders: Headers): Response {
+function jsonResponse(
+  body: unknown,
+  status: number,
+  corsHeaders: Headers,
+  extraHeaders?: Record<string, string>,
+): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       'Content-Type': 'application/json',
       ...Object.fromEntries(corsHeaders),
+      ...extraHeaders,
     },
   });
 }
@@ -47,24 +58,95 @@ function errorResponse(message: string, status: number, corsHeaders: Headers): R
 function corsHeaders(env: Env): Headers {
   const headers = new Headers();
   headers.set('Access-Control-Allow-Origin', env.CORS_ORIGIN || '*');
-  headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  headers.set('Access-Control-Allow-Headers', 'Content-Type, X-Edit-Token, X-Private');
+  headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  headers.set('Access-Control-Allow-Headers', 'Content-Type, X-Edit-Token, X-Private, If-Match, If-None-Match, If-Modified-Since, X-Change-Summary');
+  headers.set('Access-Control-Expose-Headers', 'ETag, Last-Modified, Content-Length, X-Expires-At, X-Content-Hash');
   headers.set('Access-Control-Max-Age', '86400');
   return headers;
 }
 
 /**
- * Extract the session ID from a `/api/sessions/:id` path.
+ * Extract the session ID from a `/api/sessions/:id`, `/api/sessions/:id/history`,
+ * or `/api/sessions/:id/backlinks` path.
  * Returns `null` if the path doesn't match the expected pattern.
  */
 function extractSessionId(pathname: string): string | null {
   const prefix = '/api/sessions/';
   if (!pathname.startsWith(prefix)) return null;
-  const id = pathname.slice(prefix.length);
-  // Reject if there's anything after the ID (e.g. trailing slashes or sub-paths)
+  const rest = pathname.slice(prefix.length);
+  // Handle known sub-routes — strip the suffix
+  let id = rest;
+  if (id.endsWith('/history')) id = id.slice(0, -'/history'.length);
+  else if (id.endsWith('/backlinks')) id = id.slice(0, -'/backlinks'.length);
+  // Reject if there's anything else after the ID (e.g. trailing slashes or unknown sub-paths)
   if (id.includes('/')) return null;
   return id || null;
 }
+
+/**
+ * Check whether the pathname is a history sub-route: `/api/sessions/:id/history`.
+ */
+function isHistoryRoute(pathname: string): boolean {
+  return pathname.startsWith('/api/sessions/') && pathname.endsWith('/history');
+}
+
+/**
+ * Check whether the pathname is a backlinks sub-route: `/api/sessions/:id/backlinks`.
+ */
+function isBacklinksRoute(pathname: string): boolean {
+  return pathname.startsWith('/api/sessions/') && pathname.endsWith('/backlinks');
+}
+
+// ---------------------------------------------------------------------------
+// Partial read helpers
+// ---------------------------------------------------------------------------
+
+/** Parsed and validated partial read parameters from query string. */
+interface PartialReadParams {
+  offset?: number;
+  limit?: number;
+  fieldsOnly?: 'frontmatter';
+}
+
+/**
+ * Parse `offset`, `limit`, and `fields` query parameters for partial reads.
+ * Returns `null` with an error message if validation fails.
+ */
+function parsePartialReadParams(
+  url: URL,
+): { params: PartialReadParams } | { error: string } {
+  const params: PartialReadParams = {};
+
+  const offsetStr = url.searchParams.get('offset');
+  if (offsetStr !== null) {
+    const n = Number(offsetStr);
+    if (!Number.isInteger(n) || n < 1) {
+      return { error: 'offset must be a positive integer' };
+    }
+    params.offset = n;
+  }
+
+  const limitStr = url.searchParams.get('limit');
+  if (limitStr !== null) {
+    const n = Number(limitStr);
+    if (!Number.isInteger(n) || n < 1) {
+      return { error: 'limit must be a positive integer' };
+    }
+    params.limit = n;
+  }
+
+  const fields = url.searchParams.get('fields');
+  if (fields !== null) {
+    if (fields !== 'frontmatter') {
+      return { error: 'fields must be "frontmatter"' };
+    }
+    params.fieldsOnly = 'frontmatter';
+  }
+
+  return { params };
+}
+
+// sliceContent imported from shared.ts
 
 // ---------------------------------------------------------------------------
 // Rate limiting
@@ -73,7 +155,6 @@ function extractSessionId(pathname: string): string | null {
 /**
  * Check a rate limiter binding keyed on the client IP.
  * Returns a 429 Response if the limit is exceeded, or `null` to proceed.
- * When the limiter binding is not provisioned, returns `null` (allow).
  */
 async function checkRateLimit(
   limiter: RateLimit | undefined,
@@ -128,8 +209,6 @@ async function verifyTurnstile(
     const outcome = await result.json<{ success: boolean }>();
     return outcome.success === true;
   } catch (err) {
-    // Turnstile infrastructure unavailable — fail open for availability.
-    // Rate limiting is the secondary defense if Turnstile is down.
     console.error(JSON.stringify({
       message: 'turnstile verification failed',
       error: err instanceof Error ? err.message : String(err),
@@ -144,14 +223,22 @@ async function verifyTurnstile(
 
 /**
  * Handle all `/api/*` requests. CORS preflight (OPTIONS) is handled by
- * the caller in index.ts — this function handles GET, PUT, DELETE.
+ * the caller in index.ts — this function handles GET, PUT, PATCH, DELETE.
  */
-export async function handleApi(request: Request, env: Env): Promise<Response> {
+export async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const cors = corsHeaders(env);
   const url = new URL(request.url);
   const { pathname } = url;
 
   try {
+    // --- Batch routes (before session ID extraction) ---
+    if (pathname === '/api/sessions/batch/read' && request.method === 'POST') {
+      return await handleBatchRead(request, env, cors);
+    }
+    if (pathname === '/api/sessions/batch/update' && request.method === 'POST') {
+      return await handleBatchUpdate(request, env, ctx, cors);
+    }
+
     // --- Extract & validate session ID ---
     const id = extractSessionId(pathname);
     if (id === null) {
@@ -161,8 +248,28 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
       return errorResponse('Invalid session ID', 400, cors);
     }
 
+    // --- History sub-route: GET /api/sessions/:id/history ---
+    if (isHistoryRoute(pathname)) {
+      if (request.method !== 'GET') {
+        return errorResponse('Method not allowed', 405, cors);
+      }
+      const rateLimited = await checkRateLimit(env.READ_LIMITER, request, cors);
+      if (rateLimited) return rateLimited;
+      return await handleGetHistory(id, request, env, cors);
+    }
+
+    // --- Backlinks sub-route: GET /api/sessions/:id/backlinks ---
+    if (isBacklinksRoute(pathname)) {
+      if (request.method !== 'GET') {
+        return errorResponse('Method not allowed', 405, cors);
+      }
+      const rateLimited = await checkRateLimit(env.READ_LIMITER, request, cors);
+      if (rateLimited) return rateLimited;
+      return await handleGetBacklinks(id, request, env, cors);
+    }
+
     // --- Rate limiting ---
-    const isWrite = request.method === 'PUT' || request.method === 'DELETE';
+    const isWrite = request.method === 'PUT' || request.method === 'PATCH' || request.method === 'DELETE';
     const limiter = isWrite ? env.WRITE_LIMITER : env.READ_LIMITER;
     const rateLimited = await checkRateLimit(limiter, request, cors);
     if (rateLimited) return rateLimited;
@@ -172,9 +279,11 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
       case 'GET':
         return await handleGet(id, request, env, cors);
       case 'PUT':
-        return await handlePut(id, request, env, cors);
+        return await handlePut(id, request, env, ctx, cors);
+      case 'PATCH':
+        return await handlePatch(id, request, env, ctx, cors);
       case 'DELETE':
-        return await handleDelete(id, request, env, cors);
+        return await handleDelete(id, request, env, ctx, cors);
       default:
         return errorResponse('Method not allowed', 405, cors);
     }
@@ -199,7 +308,7 @@ export function handleCorsPreflight(env: Env): Response {
 }
 
 // ---------------------------------------------------------------------------
-// Endpoint handlers
+// Endpoint handlers — thin HTTP wrappers over shared session logic
 // ---------------------------------------------------------------------------
 
 async function handleGet(
@@ -208,34 +317,77 @@ async function handleGet(
   env: Env,
   cors: Headers,
 ): Promise<Response> {
-  const { value: content, metadata } =
-    await env.SESSIONS.getWithMetadata<SessionMetadata>(id);
+  // --- Parse partial read params early (before KV read) to fail fast ---
+  const url = new URL(request.url);
+  const parsed = parsePartialReadParams(url);
+  if ('error' in parsed) {
+    return errorResponse(parsed.error, 400, cors);
+  }
+  const { offset, limit, fieldsOnly } = parsed.params;
 
-  if (content === null || metadata === null) {
-    return errorResponse('Session not found', 404, cors);
+  // --- Call shared getSession logic ---
+  const editToken = request.headers.get('X-Edit-Token') || undefined;
+  const result = await getSession(env, id, editToken, request);
+
+  if (!result.success) {
+    return errorResponse(result.error, result.status, cors);
   }
 
-  // Private sessions require a valid edit token to view — return 404 (not
-  // 403) to avoid revealing that the session exists.
-  if (metadata.private) {
-    const editTokenHeader = request.headers.get('X-Edit-Token');
-    if (!editTokenHeader || !timingSafeEqual(editTokenHeader, metadata.editToken)) {
-      return errorResponse('Session not found', 404, cors);
-    }
+  // 304 Not Modified
+  if ('notModified' in result) {
+    return new Response(null, {
+      status: 304,
+      headers: {
+        ...Object.fromEntries(cors),
+        ...result.headers,
+      },
+    });
   }
+
+  // Narrow type: full session data
+  const session = result as GetSessionSuccess;
+
+  // Single split: compute totalLines and sliced content in one pass
+  const { sliced, totalLines } = sliceContent(session.content, offset, limit);
+
+  // --- fields=frontmatter: metadata-only response (no content) ---
+  if (fieldsOnly === 'frontmatter') {
+    return jsonResponse(
+      {
+        id,
+        metadata: session.metadata,
+        private: session.private,
+        frontmatter: session.frontmatter,
+        totalLines,
+        etag: session.etag,
+        contentHash: session.contentHash,
+        ...(session.expiresAt !== undefined && { expiresAt: session.expiresAt }),
+      },
+      200,
+      cors,
+      session.headers,
+    );
+  }
+
+  // --- Build response with optional line-range info ---
+  const isPartial = offset !== undefined || limit !== undefined;
 
   return jsonResponse(
     {
       id,
-      content,
-      metadata: {
-        createdAt: metadata.createdAt,
-        updatedAt: metadata.updatedAt,
-      },
-      private: !!metadata.private,
+      content: sliced,
+      metadata: session.metadata,
+      private: session.private,
+      frontmatter: session.frontmatter,
+      totalLines,
+      ...(isPartial && { range: { offset: offset ?? 1, limit } }),
+      etag: session.etag,
+      contentHash: session.contentHash,
+      ...(session.expiresAt !== undefined && { expiresAt: session.expiresAt }),
     },
     200,
     cors,
+    session.headers,
   );
 }
 
@@ -243,11 +395,10 @@ async function handlePut(
   id: string,
   request: Request,
   env: Env,
+  ctx: ExecutionContext,
   cors: Headers,
 ): Promise<Response> {
   // --- Content-Type handling ---
-  // Accept both application/json (browser SPA) and text/markdown (agents/scripts).
-  // text/markdown: body IS the raw markdown. JSON: body is { content, ... }.
   const contentType = request.headers.get('Content-Type') ?? '';
   const isMarkdownBody = contentType.includes('text/markdown');
   if (!isMarkdownBody && !contentType.includes('application/json')) {
@@ -268,13 +419,11 @@ async function handlePut(
   let record: Record<string, unknown> = {};
 
   if (isMarkdownBody) {
-    // text/markdown: raw body is the content
     content = await request.text();
     if (!content && content !== '') {
       return errorResponse('Empty body', 400, cors);
     }
   } else {
-    // application/json: { content, private?, turnstileToken? }
     let body: unknown;
     try {
       body = await request.json();
@@ -291,123 +440,185 @@ async function handlePut(
     content = record.content;
   }
 
-  // --- Double-check content size after parsing ---
-  const encoder = new TextEncoder();
-  if (encoder.encode(content).byteLength > MAX_CONTENT_LENGTH) {
-    return errorResponse('Payload too large', 413, cors);
+  // --- Turnstile verification (only on creation, only if configured) ---
+  const turnstileToken = typeof record.turnstileToken === 'string' ? record.turnstileToken : null;
+  let hasTurnstile = false;
+
+  if (env.TURNSTILE_SECRET_KEY && turnstileToken) {
+    const remoteIp = request.headers.get('cf-connecting-ip') || '';
+    const valid = await verifyTurnstile(env.TURNSTILE_SECRET_KEY, turnstileToken, remoteIp);
+    if (!valid) {
+      return errorResponse('Bot verification failed', 403, cors);
+    }
+    hasTurnstile = true;
   }
 
-  // --- Load existing session ---
-  const { value: existingContent, metadata: existingMeta } =
-    await env.SESSIONS.getWithMetadata<SessionMetadata>(id);
+  // --- Extract changeSummary (JSON body field or X-Change-Summary header) ---
+  const changeSummary = typeof record.changeSummary === 'string' && record.changeSummary.trim()
+    ? record.changeSummary.trim()
+    : request.headers.get('X-Change-Summary')?.trim() || '';
 
-  const editTokenHeader = request.headers.get('X-Edit-Token');
+  // --- Determine private flag ---
+  const privateHeader = request.headers.get('X-Private');
+  const isPrivate = typeof record.private === 'boolean'
+    ? record.private
+    : privateHeader !== null
+      ? privateHeader === 'true'
+      : undefined;  // undefined = preserve existing
 
-  // CREATE: no token + session doesn't exist → generate editToken, store, return 201
-  if (existingContent === null && !editTokenHeader) {
-    // --- Turnstile verification (only on creation, only if configured) ---
-    // Turnstile is a fast-pass, not a gate. If a token is present, verify it
-    // (reject fakes). If absent, skip — rate limiting is the fallback.
-    // This allows agents/scripts to create sessions without a browser.
-    const turnstileToken = typeof record.turnstileToken === 'string' ? record.turnstileToken : null;
-    let hasTurnstile = false;
+  // --- Extract conditional headers ---
+  const ifNoneMatch = request.headers.get('If-None-Match');
+  const ifMatch = request.headers.get('If-Match');
 
-    if (env.TURNSTILE_SECRET_KEY && turnstileToken) {
-      const remoteIp = request.headers.get('cf-connecting-ip') || '';
-      const valid = await verifyTurnstile(env.TURNSTILE_SECRET_KEY, turnstileToken, remoteIp);
-      if (!valid) {
-        return errorResponse('Bot verification failed', 403, cors);
-      }
-      hasTurnstile = true;
+  // --- Call shared putSession logic ---
+  const requestUrl = new URL(request.url);
+  const result = await putSession(env, ctx, id, content, {
+    editToken: request.headers.get('X-Edit-Token') || undefined,
+    private: isPrivate,
+    ifMatch: ifMatch,
+    ifNoneMatchStar: ifNoneMatch !== null && ifNoneMatch.trim() === '*',
+    changeSummary: changeSummary || undefined,
+    turnstileVerified: hasTurnstile,
+    requestOrigin: requestUrl.origin,
+    origin: requestUrl.origin,
+  });
+
+  if (!result.success) {
+    if (result.currentETag) {
+      return jsonResponse(
+        { error: result.error, currentETag: result.currentETag },
+        result.status,
+        cors,
+        { 'ETag': result.currentETag },
+      );
     }
+    return errorResponse(result.error, result.status, cors);
+  }
 
-    const now = Date.now();
-    const editToken = nanoid(24);
-    // Private flag: from JSON body (browser) or X-Private header (agents using text/markdown)
-    const isPrivate = typeof record.private === 'boolean'
-      ? record.private
-      : request.headers.get('X-Private') === 'true';
-    // Browser sessions (Turnstile verified): 90 days. Agent sessions: 30 days.
-    const ttl = hasTurnstile ? EXPIRATION_TTL : AGENT_EXPIRATION_TTL;
-    const metadata: SessionMetadata = {
-      createdAt: now,
-      updatedAt: now,
-      editToken,
-      private: isPrivate,
-      ttl,
-    };
-
-    await env.SESSIONS.put(id, content, {
-      metadata,
-      expirationTtl: ttl,
-    });
-
-    // Build share URLs for the response
-    const origin = new URL(request.url).origin;
+  // CREATE response (201)
+  if (result.created) {
     return jsonResponse(
       {
-        id,
-        metadata: { createdAt: now, updatedAt: now },
-        editToken,
-        private: isPrivate,
-        url: `${origin}/${id}`,
-        editUrl: `${origin}/${id}#token=${editToken}`,
+        id: result.id,
+        metadata: result.metadata,
+        editToken: result.editToken,
+        private: result.private,
+        url: result.url,
+        editUrl: result.editUrl,
+        etag: result.etag,
+        contentHash: result.contentHash,
+        ...(result.expiresAt !== undefined && { expiresAt: result.expiresAt }),
       },
       201,
       cors,
+      result.headers,
     );
   }
 
-  // Session exists — verify edit token
-  if (existingContent !== null && existingMeta !== null) {
-    if (!editTokenHeader || !timingSafeEqual(editTokenHeader, existingMeta.editToken)) {
-      // FORBIDDEN: no/invalid token + session exists
-      return errorResponse('Forbidden', 403, cors);
+  // UPDATE response (200) — now includes frontmatter (normalizing with PATCH)
+  return jsonResponse(
+    {
+      id: result.id,
+      metadata: result.metadata,
+      private: result.private,
+      frontmatter: result.frontmatter,
+      etag: result.etag,
+      contentHash: result.contentHash,
+      ...(result.expiresAt !== undefined && { expiresAt: result.expiresAt }),
+    },
+    200,
+    cors,
+    result.headers,
+  );
+}
+
+async function handlePatch(
+  id: string,
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  cors: Headers,
+): Promise<Response> {
+  // --- Require edit token ---
+  const editTokenHeader = request.headers.get('X-Edit-Token');
+  if (!editTokenHeader) {
+    return errorResponse('Forbidden', 403, cors);
+  }
+
+  // --- Parse request body ---
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON', 400, cors);
+  }
+
+  if (typeof body !== 'object' || body === null) {
+    return errorResponse('Invalid request body', 400, cors);
+  }
+  const record = body as Record<string, unknown>;
+
+  if (!Array.isArray(record.operations) || record.operations.length === 0) {
+    return errorResponse('operations must be a non-empty array', 400, cors);
+  }
+  const operations = record.operations as PatchOperation[];
+
+  // --- Extract changeSummary and If-Match ---
+  const changeSummary = typeof record.changeSummary === 'string' && record.changeSummary.trim()
+    ? record.changeSummary.trim()
+    : request.headers.get('X-Change-Summary')?.trim() || '';
+
+  const ifMatch = request.headers.get('If-Match');
+
+  // --- Call shared patchSession logic ---
+  const result = await patchSession(env, ctx, id, operations, editTokenHeader, {
+    ifMatch: ifMatch,
+    changeSummary: changeSummary || undefined,
+    origin: new URL(request.url).origin,
+  });
+
+  if (!result.success) {
+    // 422 with operation failure details
+    if ('failedOperation' in result) {
+      return jsonResponse(
+        { error: result.error, failedOperation: result.failedOperation, op: result.op },
+        422,
+        cors,
+      );
     }
-
-    // UPDATE: valid token + session exists → reset TTL (preserved tier), return 200
-    const now = Date.now();
-    // If `private` is explicitly set (JSON body or X-Private header), update; otherwise preserve
-    const privateHeader = request.headers.get('X-Private');
-    const isPrivate = typeof record.private === 'boolean'
-      ? record.private
-      : privateHeader !== null
-        ? privateHeader === 'true'
-        : !!existingMeta.private;
-    // Preserve the original TTL tier (browser 90d vs agent 30d)
-    const ttl = existingMeta.ttl ?? EXPIRATION_TTL;
-    const metadata: SessionMetadata = {
-      createdAt: existingMeta.createdAt,
-      updatedAt: now,
-      editToken: existingMeta.editToken,
-      private: isPrivate,
-      ttl,
-    };
-
-    await env.SESSIONS.put(id, content, {
-      metadata,
-      expirationTtl: ttl,
-    });
-
-    return jsonResponse(
-      {
-        id,
-        metadata: { createdAt: existingMeta.createdAt, updatedAt: now },
-        private: isPrivate,
-      },
-      200,
-      cors,
-    );
+    // 412 with currentETag (SessionError branch)
+    if ('currentETag' in result && result.currentETag) {
+      return jsonResponse(
+        { error: result.error, currentETag: result.currentETag },
+        result.status,
+        cors,
+        { 'ETag': result.currentETag },
+      );
+    }
+    return errorResponse(result.error, result.status, cors);
   }
 
-  // Edge case: token provided but session doesn't exist
-  return errorResponse('Session not found', 404, cors);
+  return jsonResponse(
+    {
+      id: result.id,
+      metadata: result.metadata,
+      private: result.private,
+      frontmatter: result.frontmatter,
+      etag: result.etag,
+      contentHash: result.contentHash,
+      ...(result.expiresAt !== undefined && { expiresAt: result.expiresAt }),
+    },
+    200,
+    cors,
+    result.headers,
+  );
 }
 
 async function handleDelete(
   id: string,
   request: Request,
   env: Env,
+  ctx: ExecutionContext,
   cors: Headers,
 ): Promise<Response> {
   const editTokenHeader = request.headers.get('X-Edit-Token');
@@ -415,18 +626,11 @@ async function handleDelete(
     return errorResponse('Forbidden', 403, cors);
   }
 
-  const { value: existingContent, metadata: existingMeta } =
-    await env.SESSIONS.getWithMetadata<SessionMetadata>(id);
+  const result = await deleteSession(env, ctx, id, editTokenHeader);
 
-  if (existingContent === null || existingMeta === null) {
-    return errorResponse('Session not found', 404, cors);
+  if (!result.success) {
+    return errorResponse(result.error, result.status, cors);
   }
-
-  if (!timingSafeEqual(editTokenHeader, existingMeta.editToken)) {
-    return errorResponse('Forbidden', 403, cors);
-  }
-
-  await env.SESSIONS.delete(id);
 
   return new Response(null, {
     status: 204,
@@ -435,284 +639,470 @@ async function handleDelete(
 }
 
 // ---------------------------------------------------------------------------
-// URL Import — Secure proxy for fetching external markdown
+// History retrieval
 // ---------------------------------------------------------------------------
 
-const MAX_IMPORT_REDIRECTS = 3;
-const IMPORT_TIMEOUT_MS = 5000;
-const MAX_IMPORT_BYTES = 524_288; // 512 KB
+async function handleGetHistory(
+  id: string,
+  request: Request,
+  env: Env,
+  cors: Headers,
+): Promise<Response> {
+  const editToken = request.headers.get('X-Edit-Token') || undefined;
+  const result = await getHistory(env, id, editToken);
 
-/** Content types we explicitly allow for URL import. */
-const ALLOWED_IMPORT_TYPES = [
-  'text/plain',
-  'text/markdown',
-  'text/x-markdown',
-  'application/markdown',
-  'application/x-markdown',
-];
-
-/** Content types we reject with a specific, helpful hint. */
-const REJECTED_TYPE_HINTS: Record<string, string> = {
-  'text/html': 'This URL returned HTML, not markdown. Try the raw file URL.',
-  'application/xhtml+xml': 'This URL returned HTML, not markdown. Try the raw file URL.',
-  'application/json': 'This URL returned JSON, not markdown.',
-};
-
-/**
- * Typed error for the URL import pipeline. Each validation step throws
- * an ImportError with a user-facing message and HTTP status code.
- */
-class ImportError extends Error {
-  name = 'ImportError';
-  constructor(
-    message: string,
-    public status: number,
-  ) {
-    super(message);
+  if (!result.success) {
+    return errorResponse(result.error, result.status, cors);
   }
+
+  return jsonResponse(
+    {
+      id: result.id,
+      history: result.history,
+    },
+    200,
+    cors,
+    result.headers,
+  );
 }
 
-// ---- Step 3: Hostname blocking (SSRF prevention) ----
+// ---------------------------------------------------------------------------
+// Backlinks retrieval
+// ---------------------------------------------------------------------------
+
+async function handleGetBacklinks(
+  id: string,
+  request: Request,
+  env: Env,
+  cors: Headers,
+): Promise<Response> {
+  const editToken = request.headers.get('X-Edit-Token') || undefined;
+  const result = await getBacklinks(env, id, editToken);
+
+  if (!result.success) {
+    return errorResponse(result.error, result.status, cors);
+  }
+
+  return jsonResponse(
+    {
+      id: result.id,
+      backlinks: result.backlinks,
+    },
+    200,
+    cors,
+    result.headers,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Batch Read
+// ---------------------------------------------------------------------------
+
+/** Maximum number of documents in a single batch read request. */
+const MAX_BATCH_READ_IDS = 20;
 
 /**
- * Check whether a hostname resolves to a private, loopback, link-local,
- * or cloud metadata address. Uses the **normalized** hostname from
- * `new URL()` so hex/octal/decimal-encoded IPs are caught automatically.
+ * Handle `POST /api/sessions/batch/read` — read multiple documents in one
+ * request with per-document auth and conditional reads.
  *
- * Applied to the initial URL AND every redirect destination.
+ * Rate limiting: each document counts as one read against READ_LIMITER.
+ * The limiter is checked N times sequentially before the parallel reads.
  */
-function isBlockedHost(hostname: string): boolean {
-  const lower = hostname.toLowerCase().replace(/^\[|\]$/g, ''); // strip IPv6 brackets
-
-  // Exact-match blocklist
-  if (lower === 'localhost' || lower === '0.0.0.0' || lower === '::' || lower === '::1') return true;
-  if (lower === '169.254.169.254') return true;
-  if (lower === 'metadata.google.internal' || lower === 'metadata.google.com') return true;
-
-  // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1)
-  // Block conservatively — all ::ffff: addresses map to IPv4 and could target private ranges
-  if (lower.startsWith('::ffff:')) {
-    const mapped = lower.slice(7);
-    // Dotted-decimal form: recurse to check the embedded IPv4 address
-    if (/^\d+\.\d+\.\d+\.\d+$/.test(mapped)) return isBlockedHost(mapped);
-    // Hex form (e.g. ::ffff:7f00:1) — block all mapped addresses conservatively
-    return true;
+async function handleBatchRead(
+  request: Request,
+  env: Env,
+  cors: Headers,
+): Promise<Response> {
+  // --- Parse request body ---
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON', 400, cors);
   }
 
-  // IPv4 range checks
-  const ipv4Match = lower.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (ipv4Match) {
-    const [, aStr, bStr] = ipv4Match;
-    const a = Number(aStr);
-    const b = Number(bStr);
-    if (a === 127) return true;                        // 127.0.0.0/8 loopback
-    if (a === 10) return true;                         // 10.0.0.0/8 private
-    if (a === 172 && b >= 16 && b <= 31) return true;  // 172.16.0.0/12 private
-    if (a === 192 && b === 168) return true;            // 192.168.0.0/16 private
-    if (a === 169 && b === 254) return true;            // 169.254.0.0/16 link-local
-    if (a === 0) return true;                          // 0.0.0.0/8
+  if (typeof body !== 'object' || body === null) {
+    return errorResponse('Invalid request body', 400, cors);
+  }
+  const record = body as Record<string, unknown>;
+
+  // --- Validate ids ---
+  if (!Array.isArray(record.ids)) {
+    return errorResponse('ids must be an array', 400, cors);
+  }
+  const rawIds = record.ids as unknown[];
+  if (rawIds.length === 0) {
+    return errorResponse('ids must not be empty', 400, cors);
+  }
+  if (rawIds.length > MAX_BATCH_READ_IDS) {
+    return errorResponse(`Too many ids (max ${MAX_BATCH_READ_IDS})`, 400, cors);
   }
 
-  // IPv6 private/link-local ranges
-  if (lower.startsWith('fe80:')) return true;   // link-local
-  if (lower.startsWith('fc00:')) return true;   // unique local (private)
-  if (lower.startsWith('fd00:')) return true;   // unique local (private)
+  // Separate valid IDs from invalid ones upfront — invalid IDs go straight
+  // to errors without consuming rate limit tokens or triggering KV reads.
+  const validIds: string[] = [];
+  const errors: Record<string, unknown>[] = [];
 
-  return false;
+  for (const rawId of rawIds) {
+    if (typeof rawId !== 'string') {
+      errors.push({ id: String(rawId), status: 400, error: 'Invalid session ID' });
+    } else if (!SESSION_ID_RE.test(rawId)) {
+      errors.push({ id: rawId, status: 400, error: 'Invalid session ID' });
+    } else {
+      validIds.push(rawId);
+    }
+  }
+
+  // --- Validate optional tokens map ---
+  const tokens: Record<string, string> = {};
+  if (record.tokens !== undefined) {
+    if (typeof record.tokens !== 'object' || record.tokens === null || Array.isArray(record.tokens)) {
+      return errorResponse('tokens must be an object', 400, cors);
+    }
+    for (const [k, v] of Object.entries(record.tokens as Record<string, unknown>)) {
+      if (typeof v === 'string') {
+        tokens[k] = v;
+      }
+    }
+  }
+
+  // --- Validate optional etags map ---
+  const etags: Record<string, string> = {};
+  if (record.etags !== undefined) {
+    if (typeof record.etags !== 'object' || record.etags === null || Array.isArray(record.etags)) {
+      return errorResponse('etags must be an object', 400, cors);
+    }
+    for (const [k, v] of Object.entries(record.etags as Record<string, unknown>)) {
+      if (typeof v === 'string') {
+        etags[k] = v;
+      }
+    }
+  }
+
+  // --- Validate optional partial read params ---
+  let offset: number | undefined;
+  let limit: number | undefined;
+  let fieldsOnly: 'frontmatter' | undefined;
+
+  if (record.offset !== undefined) {
+    if (typeof record.offset !== 'number' || !Number.isInteger(record.offset) || record.offset < 1) {
+      return errorResponse('offset must be a positive integer', 400, cors);
+    }
+    offset = record.offset;
+  }
+  if (record.limit !== undefined) {
+    if (typeof record.limit !== 'number' || !Number.isInteger(record.limit) || record.limit < 1) {
+      return errorResponse('limit must be a positive integer', 400, cors);
+    }
+    limit = record.limit;
+  }
+  if (record.fields !== undefined) {
+    if (record.fields !== 'frontmatter') {
+      return errorResponse('fields must be "frontmatter"', 400, cors);
+    }
+    fieldsOnly = 'frontmatter';
+  }
+
+  // --- Rate limiting: consume N reads (one per valid document) ---
+  // The simple rate limiter only supports consuming 1 unit at a time,
+  // so we call it N times sequentially before the parallel reads.
+  // Only valid IDs count — invalid IDs are already in the errors array.
+  if (env.READ_LIMITER && validIds.length > 0) {
+    const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+    for (let i = 0; i < validIds.length; i++) {
+      const { success } = await env.READ_LIMITER.limit({ key: ip });
+      if (!success) {
+        const headers = new Headers({
+          'Content-Type': 'application/json',
+          'Retry-After': '60',
+          ...Object.fromEntries(cors),
+        });
+        return new Response(JSON.stringify({ error: 'Rate limit exceeded' }), {
+          status: 429,
+          headers,
+        });
+      }
+    }
+  }
+
+  // --- Parallel reads via Promise.allSettled ---
+  const readPromises = validIds.map((id) => {
+    const token = tokens[id] || undefined;
+    return getSession(env, id, token);
+  });
+
+  const settled = await Promise.allSettled(readPromises);
+
+  // --- Assemble response ---
+  const documents: Record<string, unknown>[] = [];
+
+  for (let i = 0; i < settled.length; i++) {
+    const id = validIds[i];
+    const outcome = settled[i];
+
+    // Unexpected rejection (shouldn't happen — getSession doesn't throw)
+    if (outcome.status === 'rejected') {
+      errors.push({ id, status: 500, error: 'Internal error' });
+      continue;
+    }
+
+    const result: GetSessionResult = outcome.value;
+
+    // Error from getSession (404, 403, etc.)
+    if (!result.success) {
+      errors.push({ id, status: result.status, error: result.error });
+      continue;
+    }
+
+    // 304 equivalent from getSession (notModified) — shouldn't happen without
+    // a Request object, but handle defensively. Extract ETag from response
+    // headers when available, fall back to client-provided ETag.
+    if ('notModified' in result) {
+      const serverETag = result.headers?.['ETag'] ?? etags[id] ?? null;
+      documents.push({ id, unchanged: true, etag: serverETag });
+      continue;
+    }
+
+    // Full session data — check client-provided ETags for conditional reads
+    const session = result as GetSessionSuccess;
+    const clientETag = etags[id];
+    if (clientETag !== undefined) {
+      // Weak comparison: strip W/ prefix, compare opaque-tags
+      if (normalizeETag(clientETag) === normalizeETag(session.etag)) {
+        documents.push({ id, unchanged: true, etag: session.etag });
+        continue;
+      }
+    }
+
+    // Apply line-range slicing
+    const { sliced, totalLines } = sliceContent(session.content, offset, limit);
+    const isPartial = offset !== undefined || limit !== undefined;
+
+    // fields=frontmatter: metadata-only response (no content)
+    if (fieldsOnly === 'frontmatter') {
+      documents.push({
+        id,
+        metadata: session.metadata,
+        private: session.private,
+        frontmatter: session.frontmatter,
+        totalLines,
+        etag: session.etag,
+        contentHash: session.contentHash,
+        ...(session.expiresAt !== undefined && { expiresAt: session.expiresAt }),
+      });
+      continue;
+    }
+
+    // Full document response
+    documents.push({
+      id,
+      content: sliced,
+      metadata: session.metadata,
+      private: session.private,
+      frontmatter: session.frontmatter,
+      totalLines,
+      ...(isPartial && { range: { offset: offset ?? 1, limit } }),
+      etag: session.etag,
+      contentHash: session.contentHash,
+      ...(session.expiresAt !== undefined && { expiresAt: session.expiresAt }),
+    });
+  }
+
+  return jsonResponse({ documents, errors }, 200, cors);
 }
 
-// ---- Step 4: Manual redirect handling ----
+// ---------------------------------------------------------------------------
+// Batch Update
+// ---------------------------------------------------------------------------
+
+/** Maximum number of updates in a single batch request. */
+const MAX_BATCH_UPDATES = 10;
+
+/** A single validated update item in a batch update request body. */
+interface BatchUpdateItem {
+  id: string;
+  editToken: string;
+  content: string;
+  ifMatch?: string;
+  changeSummary?: string;
+  private?: boolean;
+}
 
 /**
- * Fetch a URL with manual redirect handling. On every hop (including
- * the initial request), re-validates scheme, credentials, and hostname
- * to prevent SSRF via redirect chains.
+ * Handle `POST /api/sessions/batch/update` — update multiple documents
+ * in one request with per-document auth and conditional logic.
+ *
+ * Each update goes through the same validation as a single PUT. Updates
+ * are processed sequentially to avoid rate limit counter races. Rate
+ * limiting is checked per-update — if the limiter is exhausted mid-batch,
+ * remaining updates are collected as 429 errors.
+ *
+ * Not atomic: each update succeeds or fails independently.
  */
-async function fetchWithRedirects(url: string, maxRedirects = MAX_IMPORT_REDIRECTS): Promise<Response> {
-  let currentUrl = url;
-  // Single timeout signal shared across all hops — caps total fetch time at 5s
-  const timeoutSignal = AbortSignal.timeout(IMPORT_TIMEOUT_MS);
+async function handleBatchUpdate(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  cors: Headers,
+): Promise<Response> {
+  // --- Parse request body ---
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON', 400, cors);
+  }
 
-  for (let i = 0; i <= maxRedirects; i++) {
-    // Re-validate steps 1-3 on EVERY hop
-    const parsed = new URL(currentUrl);
-    if (parsed.protocol !== 'https:') {
-      throw new ImportError('Redirect to non-HTTPS URL', 400);
+  if (typeof body !== 'object' || body === null) {
+    return errorResponse('Invalid request body', 400, cors);
+  }
+
+  const record = body as Record<string, unknown>;
+
+  if (!Array.isArray(record.updates)) {
+    return errorResponse('updates must be an array', 400, cors);
+  }
+
+  const updates = record.updates as unknown[];
+
+  if (updates.length === 0) {
+    return errorResponse('updates must be a non-empty array', 400, cors);
+  }
+
+  if (updates.length > MAX_BATCH_UPDATES) {
+    return errorResponse(`Too many updates (max ${MAX_BATCH_UPDATES})`, 400, cors);
+  }
+
+  // --- Validate each update item shape before processing ---
+  const validatedUpdates: BatchUpdateItem[] = [];
+  for (let i = 0; i < updates.length; i++) {
+    const item = updates[i];
+    if (typeof item !== 'object' || item === null) {
+      return errorResponse(`updates[${i}] must be an object`, 400, cors);
     }
-    if (parsed.username || parsed.password) {
-      throw new ImportError('Redirect URL contains credentials', 400);
+    const rec = item as Record<string, unknown>;
+
+    if (typeof rec.id !== 'string' || !SESSION_ID_RE.test(rec.id)) {
+      return errorResponse(`updates[${i}].id must be a valid session ID`, 400, cors);
     }
-    if (isBlockedHost(parsed.hostname)) {
-      throw new ImportError('Redirect points to a private or reserved address', 400);
+    if (typeof rec.editToken !== 'string' || !rec.editToken) {
+      return errorResponse(`updates[${i}].editToken is required`, 400, cors);
+    }
+    if (typeof rec.content !== 'string') {
+      return errorResponse(`updates[${i}].content must be a string`, 400, cors);
+    }
+    if (rec.ifMatch !== undefined && typeof rec.ifMatch !== 'string') {
+      return errorResponse(`updates[${i}].ifMatch must be a string`, 400, cors);
+    }
+    if (rec.changeSummary !== undefined && typeof rec.changeSummary !== 'string') {
+      return errorResponse(`updates[${i}].changeSummary must be a string`, 400, cors);
+    }
+    if (rec.private !== undefined && typeof rec.private !== 'boolean') {
+      return errorResponse(`updates[${i}].private must be a boolean`, 400, cors);
     }
 
-    const response = await fetch(currentUrl, {
-      redirect: 'manual', // SECURITY: follow redirects manually to re-validate SSRF checks on each hop
-      signal: timeoutSignal,
-      headers: {
-        'User-Agent': 'markdown-viewer/1.0 (URL Import)',
-        'Accept': 'text/plain, text/markdown, application/markdown, text/*',
-      },
+    validatedUpdates.push({
+      id: rec.id,
+      editToken: rec.editToken,
+      content: rec.content,
+      ifMatch: rec.ifMatch as string | undefined,
+      changeSummary: rec.changeSummary as string | undefined,
+      private: rec.private as boolean | undefined,
+    });
+  }
+
+  // --- Process updates sequentially (avoids rate limit counter races) ---
+  const results: Record<string, unknown>[] = [];
+  const errors: Record<string, unknown>[] = [];
+
+  for (const update of validatedUpdates) {
+    // Per-update rate limiting — checked before each write
+    const rateLimited = await checkRateLimit(env.WRITE_LIMITER, request, cors);
+    if (rateLimited) {
+      errors.push({
+        id: update.id,
+        status: 429,
+        error: 'Rate limit exceeded',
+      });
+      continue;
+    }
+
+    const result = await putSession(env, ctx, update.id, update.content, {
+      editToken: update.editToken,
+      private: update.private,
+      ifMatch: update.ifMatch ?? null,
+      changeSummary: update.changeSummary?.trim() || undefined,
+      origin: new URL(request.url).origin,
     });
 
-    // Not a redirect — return the final response
-    if (response.status < 300 || response.status >= 400) {
-      return response;
-    }
-
-    // It's a redirect — extract and validate the Location header
-    const location = response.headers.get('Location');
-    if (!location) {
-      throw new ImportError('Redirect without Location header', 400);
-    }
-
-    // Resolve relative redirect URLs against the current URL
-    currentUrl = new URL(location, currentUrl).href;
-  }
-
-  throw new ImportError('Too many redirects', 400);
-}
-
-// ---- Steps 7-9: Streaming body read + UTF-8 validation + null bytes ----
-
-/**
- * Read a response body as text with streaming byte counting, strict
- * UTF-8 validation, and null byte detection for binary content.
- */
-async function readBodyAsText(response: Response, maxBytes = MAX_IMPORT_BYTES): Promise<string> {
-  const reader = response.body?.getReader();
-  if (!reader) throw new ImportError('Empty response body', 422);
-
-  const decoder = new TextDecoder('utf-8', { fatal: true });
-  const chunks: string[] = [];
-  let totalBytes = 0;
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      totalBytes += value.byteLength;
-      if (totalBytes > maxBytes) {
-        await reader.cancel();
-        throw new ImportError('Response exceeds 512 KB limit', 413);
+    if (!result.success) {
+      const errorEntry: Record<string, unknown> = {
+        id: update.id,
+        status: result.status,
+        error: result.error,
+      };
+      if (result.currentETag) {
+        errorEntry.currentETag = result.currentETag;
       }
-
-      // TextDecoder with fatal: true throws on invalid UTF-8 bytes
-      chunks.push(decoder.decode(value, { stream: true }));
+      errors.push(errorEntry);
+      continue;
     }
-    // Flush the decoder (catches trailing incomplete sequences)
-    chunks.push(decoder.decode());
-  } catch (e) {
-    if (e instanceof ImportError) throw e;
-    throw new ImportError('Content is not valid text', 422);
+
+    // Build success entry
+    const successEntry: Record<string, unknown> = {
+      id: result.id,
+      metadata: result.metadata,
+      private: result.private,
+      frontmatter: result.frontmatter,
+      etag: result.etag,
+      contentHash: result.contentHash,
+    };
+    if (result.expiresAt !== undefined) {
+      successEntry.expiresAt = result.expiresAt;
+    }
+    results.push(successEntry);
   }
 
-  const content = chunks.join('');
-
-  // Step 9: Null byte check — catches binary content disguised as text
-  if (content.includes('\0')) {
-    throw new ImportError('Content appears to be binary', 422);
-  }
-
-  return content;
+  return jsonResponse({ results, errors }, 200, cors);
 }
 
-// ---- Main handler ----
+// ---------------------------------------------------------------------------
+// URL Import — thin HTTP wrapper over shared importUrl logic
+// ---------------------------------------------------------------------------
 
 /**
  * Handle `POST /api/import-url` — securely proxy-fetch an external URL
- * and return its text content. Implements an 11-step validation chain
- * against SSRF, binary injection, and information leakage.
+ * and return its text content.
  */
 export async function handleImportUrl(request: Request, env: Env): Promise<Response> {
   const cors = corsHeaders(env);
 
+  // --- Rate limiting (shares WRITE_LIMITER budget with session writes) ---
+  const rateLimited = await checkRateLimit(env.WRITE_LIMITER, request, cors);
+  if (rateLimited) return rateLimited;
+
+  // --- Parse request body ---
+  let body: unknown;
   try {
-    // --- Rate limiting (shares WRITE_LIMITER budget with session writes) ---
-    const rateLimited = await checkRateLimit(env.WRITE_LIMITER, request, cors);
-    if (rateLimited) return rateLimited;
-
-    // --- Parse request body ---
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return errorResponse('Invalid JSON', 400, cors);
-    }
-
-    if (typeof body !== 'object' || body === null) {
-      return errorResponse('Missing url field', 400, cors);
-    }
-    const record = body as Record<string, unknown>;
-    if (!record.url || typeof record.url !== 'string') {
-      return errorResponse('Missing url field', 400, cors);
-    }
-
-    const targetUrl = record.url;
-
-    // --- Step 1: Scheme validation ---
-    let parsed: URL;
-    try {
-      parsed = new URL(targetUrl);
-    } catch {
-      return errorResponse('Invalid URL format', 400, cors);
-    }
-    if (parsed.protocol !== 'https:') {
-      return errorResponse('Only HTTPS URLs are supported', 400, cors);
-    }
-
-    // --- Step 2: Credentials rejection ---
-    if (parsed.username || parsed.password) {
-      return errorResponse('URLs with credentials are not supported', 400, cors);
-    }
-
-    // --- Step 3: Hostname blocking ---
-    if (isBlockedHost(parsed.hostname)) {
-      return errorResponse('URL points to a private or reserved address', 400, cors);
-    }
-
-    // --- Step 4: Fetch with manual redirect handling (re-validates 1-3 per hop) ---
-    // --- Step 5: Timeout via AbortSignal.timeout(5000) in fetchWithRedirects ---
-    const response = await fetchWithRedirects(targetUrl);
-
-    // --- Step 6: Content-Type validation ---
-    const responseContentType = response.headers.get('Content-Type') || '';
-    const mimeType = responseContentType.split(';')[0].trim().toLowerCase();
-
-    if (REJECTED_TYPE_HINTS[mimeType]) {
-      throw new ImportError(REJECTED_TYPE_HINTS[mimeType], 422);
-    }
-    // Allow empty/missing Content-Type — many raw file hosts omit it.
-    // Steps 7-9 (UTF-8 validation + null byte check) catch actual binary.
-    if (mimeType && !ALLOWED_IMPORT_TYPES.includes(mimeType) && !mimeType.startsWith('text/')) {
-      throw new ImportError(`Unsupported content type: ${mimeType}`, 422);
-    }
-
-    // --- Steps 7-9: Streaming body read + UTF-8 validation + null byte check ---
-    const content = await readBodyAsText(response);
-
-    // --- Steps 10-11: Return text only + response header isolation ---
-    // jsonResponse constructs a fresh Response — no upstream headers forwarded
-    return jsonResponse({ content }, 200, cors);
-  } catch (e) {
-    // --- Structured error handling for the full pipeline ---
-    if (e instanceof ImportError) {
-      return errorResponse(e.message, e.status, cors);
-    }
-    // TypeError from new URL() in fetchWithRedirects
-    if (e instanceof TypeError && e.message.includes('URL')) {
-      return errorResponse('Invalid URL format', 400, cors);
-    }
-    // Timeout from AbortSignal.timeout()
-    if (e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
-      return errorResponse('Request timed out', 504, cors);
-    }
-    // Catch-all for unexpected fetch failures
-    console.error(JSON.stringify({
-      message: 'import-url error',
-      error: e instanceof Error ? e.message : String(e),
-    }));
-    return errorResponse('Failed to fetch URL', 502, cors);
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON', 400, cors);
   }
+
+  if (typeof body !== 'object' || body === null) {
+    return errorResponse('Missing url field', 400, cors);
+  }
+  const record = body as Record<string, unknown>;
+  if (!record.url || typeof record.url !== 'string') {
+    return errorResponse('Missing url field', 400, cors);
+  }
+
+  // --- Call shared importUrl logic ---
+  const result = await importUrl(record.url);
+
+  if (!result.success) {
+    return errorResponse(result.error, result.status, cors);
+  }
+
+  return jsonResponse({ content: result.content }, 200, cors);
 }

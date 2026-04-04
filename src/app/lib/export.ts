@@ -12,6 +12,15 @@ import { renderMarkdown, extractTitle } from '../../shared/markdown';
 import { buildHtmlDocument } from '../../shared/html-document';
 
 // ---------------------------------------------------------------------------
+// Internal: strip UI-only elements from rendered HTML before export/copy
+// ---------------------------------------------------------------------------
+
+/** Remove heading anchor links — they're interactive UI, not document content. */
+function stripAnchors(html: string): string {
+  return html.replace(/<a class="heading-anchor"[^>]*>.*?<\/a>/g, '');
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -24,7 +33,7 @@ export function downloadMarkdown(content: string, sessionId: string | null): voi
 
 /** Download rendered HTML as a standalone `.html` file. */
 export function downloadHtml(content: string, title: string): void {
-  const html = renderMarkdown(content);
+  const html = stripAnchors(renderMarkdown(content));
   const doc = buildHtmlDocument(html, title);
   const blob = new Blob([doc], { type: 'text/html;charset=utf-8' });
   downloadBlob(blob, `${sanitizeFilename(title) || 'untitled'}.html`);
@@ -37,7 +46,7 @@ export function downloadHtml(content: string, title: string): void {
  * layout which would print only the visible portion.
  */
 export function printToPdf(content: string, title: string): void {
-  const html = renderMarkdown(content);
+  const html = stripAnchors(renderMarkdown(content));
   const doc = buildHtmlDocument(html, title);
 
   const iframe = document.createElement('iframe');
@@ -72,7 +81,7 @@ export function printToPdf(content: string, title: string): void {
  * Returns `true` on success, `false` on failure.
  */
 export async function copyRendered(content: string): Promise<boolean> {
-  const html = renderMarkdown(content);
+  const html = stripAnchors(renderMarkdown(content));
   try {
     await navigator.clipboard.write([
       new ClipboardItem({

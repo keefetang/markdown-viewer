@@ -16,7 +16,8 @@ Single Cloudflare Worker project with three responsibilities:
 /assets/*  →  CDN (no Worker invocation)
 /*         →  Worker
                ├── /         → ASSETS.fetch() + HTMLRewriter (OG tags + SEO content + config)
-               ├── /api/*    → REST API (4 endpoints)
+               ├── /api/*    → REST API (sessions, batch, history, import-url)
+               ├── /mcp      → MCP Server (13 tools, Streamable HTTP transport)
                ├── /robots.txt → Static text
                └── /:id      → SSR via HTMLRewriter (OG tags + rendered content + bootstrap data)
 ```
@@ -33,13 +34,16 @@ Single Cloudflare Worker project with three responsibilities:
 src/
 ├── worker/                 # Cloudflare Worker (server)
 │   ├── index.ts            # Router: API, SSR, assets, CORS, error handling
-│   ├── api.ts              # REST API: GET, PUT (upsert), DELETE sessions + POST import-url
+│   ├── api.ts              # REST API: GET, PUT, PATCH, DELETE, batch, history + POST import-url
+│   ├── sessions.ts         # Shared business logic (getSession, putSession, patchSession, etc.)
+│   ├── mcp.ts              # MCP Server (13 tools via createMcpHandler)
 │   ├── ssr.ts              # HTMLRewriter SSR for /:id routes
 │   ├── index-content.ts    # Static HTML + markdown content for index page SEO + content negotiation
 │   ├── security.ts         # Security headers middleware + CSP nonce injection
-│   └── shared.ts           # Shared types (SessionMetadata) + re-exports escape utilities
+│   └── shared.ts           # Shared types, helpers (sessionHeaders, conditional checks, history)
 ├── shared/
 │   ├── escape.ts           # Isomorphic HTML escape utilities (browser + Worker)
+│   ├── frontmatter.ts      # YAML frontmatter parse/update/serialize (isomorphic)
 │   ├── html-document.ts    # Standalone HTML document builder (shared between client export + Worker)
 │   └── markdown.ts         # markdown-it config + extractTitle (used by BOTH client and Worker)
 ├── app/                    # Svelte 5 SPA (client)
@@ -131,12 +135,14 @@ Build must produce: initial JS < 175kb gzipped. Verify with `npm run build`. KaT
 ## Security Rules (Non-Negotiable)
 
 - Never set `html: true` on markdown-it — primary XSS defense.
-- Never expose `editToken` in GET responses or SSR bootstrap data.
+- Never expose `editToken` in GET, PATCH responses, or SSR bootstrap data.
 - Always escape `<` to `\u003c` when embedding JSON in `<script>` tags.
 - Always `DOMPurify.sanitize()` before `{@html}` on the client (Workers lack DOM APIs — rely on markdown-it + CSP server-side).
-- Always use `crypto.subtle.timingSafeEqual()` for edit token comparison.
+- Always use `crypto.subtle.timingSafeEqual()` for edit token comparison — including in PATCH handlers and MCP tools.
 - CORS `Access-Control-Allow-Headers` must include `X-Edit-Token`.
 - Always add `nonce` attribute to `<script>` tags injected via HTMLRewriter — CSP uses per-request nonces (`crypto.randomUUID()`). Cloudflare Bot Management reads the nonce from the CSP header and adds it to its own injected scripts.
+- YAML frontmatter parsing must use `schema: 'core'` (YAML 1.2 core — accepts unquoted strings, no code execution in JS) — untrusted input.
+- MCP tools that write must enforce the same edit token checks as REST endpoints — no privilege escalation.
 
 ## Data Model
 
@@ -144,20 +150,52 @@ Build must produce: initial JS < 175kb gzipped. Verify with `npm run build`. KaT
 ```
 KV key:       nanoid(12) — URL-safe, cryptographically random
 KV value:     raw markdown string (max 512 KB)
-KV metadata:  { createdAt: number, updatedAt: number, editToken: string, private?: boolean, ttl?: number }
+KV metadata:  { createdAt: number, updatedAt: number, editToken: string, private?: boolean, ttl?: number, contentHash?: string }
 KV TTL:       7,776,000 seconds (90 days) for browser sessions, 2,592,000 (30 days) for agent sessions — reset on every save
 ```
 
-`private` is backward-compatible: absent or `false` = public session. `ttl` is set at creation and preserved on update.
+`private` is backward-compatible: absent or `false` = public session. `ttl` is set at creation and preserved on update. `contentHash` is a SHA-256 hex digest (64-char lowercase hex) computed on every write; absent on older documents (computed on-the-fly during reads without writing back).
+
+### Secondary KV Keys
+```
+KV key:       {id}:history — changelog entries for a session
+KV value:     JSON array of { ts: number, summary: string, bytes: number }
+KV TTL:       same as primary key (reset on each history append)
+
+KV key:       {id}:links — outbound internal links from a session
+KV value:     JSON array of target session IDs (strings)
+KV TTL:       same as primary key (reset on each content write)
+
+KV key:       {id}:backlinks — inbound links to a session from other sessions
+KV value:     JSON array of source session IDs (strings)
+KV TTL:       same as target session's primary key
+```
+
+History capped at 100 entries. Backlinks capped at 500 entries. All secondary keys deleted when the primary session is deleted.
 
 ### API Surface
 | Method | Path | Auth | Behavior |
 |--------|------|------|----------|
-| GET | `/api/sessions/:id` | Conditional | Read session. Private sessions require `X-Edit-Token` (returns 404 without — hides existence). Returns `{ id, content, metadata: { createdAt, updatedAt }, private }`. Never returns editToken. |
-| PUT | `/api/sessions/:id` | Conditional | Accepts `application/json` or `text/markdown` (raw body = content). Body or `X-Private: true` header sets privacy. No token + new → CREATE (201 + `{ id, editToken, private, url, editUrl }`). Valid token + exists → UPDATE (200). Turnstile is a fast-pass, not a gate — absent tokens skip verification (rate limiting fallback). |
-| DELETE | `/api/sessions/:id` | `X-Edit-Token` | Deletes session. 403 without valid token. |
-| POST | `/api/import-url` | Rate limited | Secure URL proxy. Body: `{ url }`. Returns `{ content }`. HTTPS only, Content-Type validated, UTF-8 verified, 512 KB limit, manual redirect handling. |
-| OPTIONS | `/api/*` | None | CORS preflight. `Access-Control-Allow-Headers` includes `X-Edit-Token, X-Private`. |
+| GET | `/api/sessions/:id` | Conditional | Read session. Supports `offset`/`limit` (line-range), `fields=frontmatter` (metadata-only). Returns `{ id, content, metadata, private, frontmatter, etag, contentHash, expiresAt, totalLines }`. Conditional: `If-None-Match` → 304, `If-Modified-Since` → 304. Never returns editToken. |
+| PUT | `/api/sessions/:id` | Conditional | Accepts `application/json` or `text/markdown`. No token + new → CREATE (201). Valid token + exists → UPDATE (200). Supports `If-Match` (412 on mismatch), `If-None-Match: *` (412 if exists). Optional `changeSummary` creates history entry. |
+| PATCH | `/api/sessions/:id` | `X-Edit-Token` | Partial write. Body: `{ operations: [...], changeSummary? }`. Operations: `append`, `insertAfter`, `replaceLine`, `updateFrontmatter`. All-or-nothing. Supports `If-Match`. |
+| DELETE | `/api/sessions/:id` | `X-Edit-Token` | Deletes session + history + link tracking. 403 without valid token. |
+| GET | `/api/sessions/:id/history` | Conditional | Returns `{ id, history: [...] }` changelog. Private sessions require token. |
+| GET | `/api/sessions/:id/backlinks` | Conditional | Returns `{ id, backlinks: [...] }` list of documents that link to this session. Private sessions require token. |
+| POST | `/api/sessions/batch/read` | Per-document | Read multiple documents. Body: `{ ids, tokens?, etags?, fields?, offset?, limit? }`. Max 20. |
+| POST | `/api/sessions/batch/update` | Per-document | Update multiple documents. Body: `{ updates: [{ id, editToken, content, ... }] }`. Max 10. |
+| POST | `/api/import-url` | Rate limited | Secure URL proxy. Body: `{ url }`. Returns `{ content }`. HTTPS only, 512 KB limit. |
+| OPTIONS | `/api/*` | None | CORS preflight. Includes `X-Edit-Token, X-Private, If-Match, If-None-Match, If-Modified-Since, X-Change-Summary`. |
+
+### MCP Server
+| Path | Transport | Tools |
+|------|-----------|-------|
+| `/mcp` | Streamable HTTP (stateless, no DO) | 13 tools: create_document, read_document, update_document, delete_document, import_url, append_to_document, insert_after_line, replace_line, update_frontmatter, batch_read_documents, batch_update_documents, get_document_history, get_backlinks |
+
+MCP tool descriptions embed YAML frontmatter conventions (`title`, `status`, `sources`, `supersedes`) — agents discover these at connection time.
+
+### MCP Discovery (Experimental)
+`GET /.well-known/mcp-server-card` returns a JSON server card per [draft SEP-2127](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2127). This is an **experimental** feature based on an unfinalized standard — revisit when SEP-2127 is adopted or superseded. Static JSON, 24-hour cache, CORS-enabled.
 
 ID validation on all endpoints: `/^[A-Za-z0-9_-]{12}$/`. Reject 400 if invalid.
 
@@ -188,7 +226,7 @@ Sources: OWASP SSRF Prevention Cheat Sheet, PortSwigger URL validation bypass re
 
 - **Initial bundle target: < 175kb gzipped** (verify with `npm run build` — JS + CSS combined)
 - **KaTeX is lazy-loaded** — NOT in the initial bundle. Two markdown-it instances: `md` (base, always available) and `mdWithKatex` (created on demand after `await import('katex')`)
-- **highlight.js** — only 10 core languages registered (js, ts, python, bash, json, html, css, go, rust, sql). Rest lazy-loaded.
+- **highlight.js** — only 11 core languages registered (js, ts, python, bash, json, html, css, go, rust, sql, yaml). Rest lazy-loaded.
 - Vite chunk size warning limit set to 900kb (KaTeX lazy chunk is ~800kb, intentional)
 
 ## Environment Variables (all optional)
@@ -211,3 +249,5 @@ When working on this project, load these skills as relevant:
 - `typescript` — type conventions
 - `interface-design` — UI craft, design system, component patterns
 - `web-perf` — Lighthouse, Core Web Vitals measurement
+
+A reference skill for the platform's MCP server is included at `.opencode/skills/markdown-pad/SKILL.md` — covers frontmatter conventions, trust model, secrets handling, and agent workflows. Load it when using the MCP tools to interact with the platform.

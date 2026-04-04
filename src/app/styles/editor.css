@@ -71,9 +71,24 @@
    via inline styles which have higher specificity than any selector.
    ================================================================ */
 
-.editor-container .cm-selectionBackground,
+/* Selection: CM6 uses absolute-positioned divs (.cm-selectionBackground)
+   behind text for selection highlights. These cause compositing layer
+   separation that degrades subpixel text rendering on macOS.
+   
+   Fix: also set ::selection on the content layer so the browser paints
+   selection inline with text, preserving rendering quality. CM6's divs
+   still handle unfocused selection and multi-cursor visual feedback. */
+.editor-container .cm-selectionBackground {
+  background: var(--selection-inactive) !important;
+}
+
 .editor-container .cm-focused .cm-selectionBackground {
-  background: color-mix(in srgb, var(--margin-note) 20%, transparent) !important;
+  background: var(--selection) !important;
+}
+
+.editor-container .cm-content ::selection {
+  background: var(--selection);
+  color: var(--ink);
 }
 
 .editor-container .cm-cursor,

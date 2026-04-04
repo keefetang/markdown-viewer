@@ -83,7 +83,9 @@ class HeadHandler implements HTMLRewriterElementContentHandlers {
   }
 
   element(el: Element): void {
-    el.append(this.tags, { html: true });
+    // Indent each tag to match <head> children (4 spaces).
+    const indented = this.tags.split('\n').join('\n    ');
+    el.append(`\n    ${indented}`, { html: true });
   }
 }
 
@@ -96,7 +98,9 @@ class ContentHandler implements HTMLRewriterElementContentHandlers {
   }
 
   element(el: Element): void {
-    el.append(`<div class="markdown-body">${this.html}</div>`, { html: true });
+    // Indent the wrapper div to match #content children (6 spaces)
+    // and restore #content closing tag indentation (4 spaces).
+    el.append(`\n      <div class="markdown-body">${this.html}</div>\n    `, { html: true });
   }
 }
 
@@ -109,9 +113,9 @@ class BodyHandler implements HTMLRewriterElementContentHandlers {
   }
 
   element(el: Element): void {
-    for (const snippet of this.snippets) {
-      el.append(snippet, { html: true });
-    }
+    // Indent each snippet to match <body> children (4 spaces).
+    const indented = this.snippets.join('\n    ');
+    el.append(`\n    ${indented}`, { html: true });
   }
 }
 
