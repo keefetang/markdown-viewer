@@ -404,6 +404,11 @@ export async function putSession(
     return { success: false, status: 413, error: 'Payload too large' };
   }
 
+  // Reject binary content (null bytes disguised as text)
+  if (content.includes('\0')) {
+    return { success: false, status: 400, error: 'Binary content is not supported' };
+  }
+
   // Load existing session
   const { value: existingContent, metadata: existingMeta } =
     await env.SESSIONS.getWithMetadata<SessionMetadata>(id);
@@ -735,6 +740,11 @@ export async function patchSession(
   const contentBytes = encoder.encode(content).byteLength;
   if (contentBytes > MAX_CONTENT_LENGTH) {
     return { success: false, status: 413, error: 'Result document exceeds 512 KB limit' };
+  }
+
+  // Reject binary content (null bytes disguised as text)
+  if (content.includes('\0')) {
+    return { success: false, status: 400, error: 'Binary content is not supported' };
   }
 
   // Write updated content to KV
