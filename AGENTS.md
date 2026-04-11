@@ -251,3 +251,12 @@ When working on this project, load these skills as relevant:
 - `web-perf` — Lighthouse, Core Web Vitals measurement
 
 A reference skill for the platform's MCP server is included at `.opencode/skills/markdown-pad/SKILL.md` — covers frontmatter conventions, trust model, secrets handling, and agent workflows. Load it when using the MCP tools to interact with the platform.
+
+
+## Git Conventions
+
+- **Always confirm with the user before pushing to remote.** No autonomous pushes.
+- **Squash related commits before pushing** when possible — keep the history clean and meaningful.
+- **Force push is allowed** for the repo admin but should be used deliberately (e.g., squashing before push, not after).
+- **Branch protection:** PRs must pass CI (`check` job) before merging. Direct pushes to main are allowed.
+- **Dependabot:** Patch/minor PRs can be merged if CI passes. Major version bumps should be tested locally first.
