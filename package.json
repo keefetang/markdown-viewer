@@ -47,7 +47,7 @@
     "dompurify": "^3.3.3",
     "github-markdown-css": "^5.9.0",
     "highlight.js": "^11.11.1",
-    "katex": "^0.16.44",
+    "katex": "^0.16.45",
     "markdown-it": "^14.1.1",
     "markdown-it-task-lists": "^2.1.1",
     "nanoid": "^5.1.7",
