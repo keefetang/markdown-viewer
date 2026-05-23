@@ -39,7 +39,7 @@
     "@codemirror/language": "^6.12.3",
     "@codemirror/search": "^6.6.0",
     "@codemirror/state": "^6.6.0",
-    "@codemirror/view": "^6.40.0",
+    "@codemirror/view": "^6.43.0",
     "@lezer/highlight": "^1.2.3",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@vscode/markdown-it-katex": "^1.1.2",
